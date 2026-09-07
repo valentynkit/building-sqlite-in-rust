@@ -27,7 +27,7 @@ fn main() -> Result<()> {
             eprintln!("Logs from your program will appear here!");
 
             // TODO: Uncomment the code below to pass the first stage
-            // println!("database page size: {}", page_size);
+            println!("database page size: {}", page_size);
         }
         _ => bail!("Missing or invalid command passed: {}", command),
     }
