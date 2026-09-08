@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::constants::{DB_HEADER_SIZE, PAGE_SIZE};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -15,6 +17,7 @@ impl DbHeader {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct PageHeader {
     page_type: PageType,
     cell_count: u16,
@@ -31,6 +34,8 @@ impl PageHeader {
         self.cell_count
     }
 }
+
+#[derive(Debug)]
 pub(crate) enum PageType {
     InteriorIndex,
     InteriorTable,
@@ -56,13 +61,15 @@ pub(crate) fn db_header(file: &File) -> anyhow::Result<DbHeader> {
     file.read_exact_at(&mut db_header, 0)?;
 
     let page_size = u16::from_be_bytes([db_header[16], db_header[17]]);
+    debug!(?page_size, "parsed db_header");
     Ok(DbHeader::new(page_size))
 }
 
 pub(crate) fn page_header(page: Vec<u8>, num_page: usize) -> anyhow::Result<PageHeader> {
+    debug!(?num_page, "read page_header");
     let mut offset: usize = 0;
     let mut out: [u8; 12] = [0; 12];
-    if num_page == 1 {
+    if num_page == 0 {
         offset += DB_HEADER_SIZE;
     }
     let page_type = PageType::try_from(page[offset])?;
@@ -73,7 +80,10 @@ pub(crate) fn page_header(page: Vec<u8>, num_page: usize) -> anyhow::Result<Page
     };
 
     let cell_count = u16::from_be_bytes([page[offset + 3], page[offset + 4]]);
-    Ok(PageHeader::new(page_type, cell_count))
+
+    let page_header = PageHeader::new(page_type, cell_count);
+    debug!(?page_header, "parsed");
+    Ok(page_header)
 }
 
 pub(crate) fn read_page(
@@ -83,6 +93,7 @@ pub(crate) fn read_page(
     page_num: usize,
 ) -> anyhow::Result<()> {
     let offset = page_size as usize * page_num;
+    debug!(?offset, ?page_size, ?page_num, "loading the page");
     file.read_exact_at(buf, offset as u64)?;
     Ok(())
 }

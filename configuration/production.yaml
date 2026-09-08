@@ -1,0 +1,6 @@
+# All interfaces: inside a container the port is published by the runtime.
+server:
+  host: 0.0.0.0
+
+telemetry:
+  log_filter: "ticket_management=info,tower_http=info,axum=info"

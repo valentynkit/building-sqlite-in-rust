@@ -1,0 +1,8 @@
+# Shared defaults. Every environment file below layers on top of this;
+# APP_* env vars override both. Nothing secret belongs here.
+server:
+  host: 127.0.0.1
+  port: 3000
+
+telemetry:
+  log_filter: "codecrafters_sqlite=debug,tower_http=debug,axum=debug"
