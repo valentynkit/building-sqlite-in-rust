@@ -15,12 +15,15 @@ pub struct Cli {
 pub enum Command {
     #[command(name = ".dbinfo")]
     DbInfo,
+    #[command(name = ".tables")]
+    Tables,
 }
 
 impl Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Command::DbInfo => write!(f, "DbInfo"),
+            Command::DbInfo => write!(f, ".dbinfo"),
+            Command::Tables => write!(f, ".tables"),
         }
     }
 }
