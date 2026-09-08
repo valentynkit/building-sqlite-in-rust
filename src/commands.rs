@@ -1,2 +1,3 @@
 pub(super) mod dbinfo;
-mod helpers;
+pub(super) mod helpers;
+pub(super) mod tables;
