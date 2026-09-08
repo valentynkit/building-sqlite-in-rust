@@ -1,0 +1,3 @@
+# Loopback only: a dev server on 0.0.0.0 is reachable from the whole network.
+server:
+  host: 127.0.0.1
