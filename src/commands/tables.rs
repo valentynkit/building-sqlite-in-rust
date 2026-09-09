@@ -1,8 +1,8 @@
 use tracing::info;
 
-use crate::commands::helpers::SqliteSchema;
+use crate::{commands::helpers::SqliteSchema, error::FormatError};
 
-pub(crate) fn run(schemas: Vec<SqliteSchema>) -> anyhow::Result<String> {
+pub(crate) fn run(schemas: Vec<SqliteSchema>) -> Result<String, FormatError> {
     info!("executing .tables command");
     let tables = schemas
         .iter()

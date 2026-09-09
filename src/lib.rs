@@ -2,10 +2,11 @@ mod cli;
 mod commands;
 pub mod config;
 mod constants;
+mod error;
 
 use std::fs::File;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 pub use cli::*;
 use tracing::{debug, info};
 
@@ -18,7 +19,7 @@ use crate::commands::{
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let path = cli.db_path;
     let cmd = cli.cmd;
-    let mut file = File::open(path)?;
+    let mut file = File::open(&path).with_context(|| format!("opening {path}"))?;
     let db_hdr = db_header(&file)?;
 
     let page_size = db_hdr.page_size();
@@ -26,11 +27,11 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     read_page(&file, &mut page_buf, page_size, 0)?;
     let schemas = parse_sqlite_schemas(&page_buf)?;
     let output = match cmd {
-        Command::DbInfo => dbinfo::run(&page_buf, db_hdr),
-        Command::Tables => tables::run(schemas),
-        Command::SqlQuery(query) => sql_query::run(&file, schemas, db_hdr, query),
+        Command::DbInfo => dbinfo::run(&page_buf, db_hdr)?,
+        Command::Tables => tables::run(schemas)?,
+        Command::SqlQuery(query) => sql_query::run(&file, schemas, db_hdr, query)?,
         _ => bail!("Missing or invalid command passed: {}", cmd),
-    }?;
+    };
 
     println!("{output}");
     Ok(())
