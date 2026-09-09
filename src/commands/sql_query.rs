@@ -12,10 +12,6 @@ pub(crate) fn run(
     query: Vec<String>,
 ) -> anyhow::Result<String> {
     assert_eq!(query.len(), 1, "query should be one element");
-    assert!(
-        schemas.len() > 1,
-        "schemas expected to have more than 1 item"
-    );
     info!("executing command {query:?}, query_len {}", query.len());
     let tokens = query[0].split(' ').collect::<Vec<&str>>();
     let second_arg = tokens
