@@ -1,3 +1,4 @@
+use anyhow::bail;
 use serde::de::value;
 use tracing::{debug, info};
 
@@ -40,6 +41,13 @@ impl PageHeader {
         &self.cell_pointers
     }
 }
+
+#[derive(Debug)]
+pub(crate) enum RecordType {
+    Table,
+    Index,
+}
+
 #[derive(Debug)]
 pub(crate) enum PageType {
     InteriorIndex,
@@ -100,7 +108,7 @@ pub(crate) fn page_header(page: &[u8], num_page: usize) -> anyhow::Result<PageHe
     Ok(page_header)
 }
 
-pub(crate) fn parse_cell(buf: &mut [u8]) -> anyhow::Result<(TableLeafCell, usize)> {
+pub(crate) fn parse_cell(buf: &[u8]) -> anyhow::Result<(TableLeafCell, usize)> {
     let mut off: usize = 0;
     debug!("start parsing a cell");
     // parsing cell
@@ -144,9 +152,7 @@ pub(crate) fn parse_cell(buf: &mut [u8]) -> anyhow::Result<(TableLeafCell, usize
     let mut values: Vec<Column> = Vec::with_capacity(rec_hdr.serial_types.len());
     for &s_type in &rec_hdr.serial_types {
         if off >= record_end_off {
-            return Err(anyhow::anyhow!(
-                "parse_cell go out of the current record offset"
-            ));
+            bail!("parse_cell go out of the current record offset");
         }
         let (col, n) = Column::parse(&buf[off..], s_type)?;
         values.push(col);
@@ -335,6 +341,82 @@ impl RecordHdr {
 pub(crate) struct Record {
     pub(crate) hdr: RecordHdr,
     pub(crate) values: Vec<Column>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SqliteSchema {
+    ty: RecordType,
+    name: String,
+    tbl_name: String,
+    rootpage: i64,
+    sql_query: String,
+}
+
+impl SqliteSchema {
+    pub(crate) fn parse(values: Vec<Column>) -> anyhow::Result<SqliteSchema> {
+        if values.len() != 5 {
+            bail!("expected values len to be 5, got {}", values.len());
+        }
+        let Column::Text(type_str) = &values[0] else {
+            bail!("couldn't parse 0 element: {:?}", values[0]);
+        };
+        let ty = match type_str.as_str() {
+            "table" => RecordType::Table,
+            "index" => RecordType::Index,
+            _ => bail!("couldn't parse 0 element {:?}", type_str),
+        };
+
+        let Column::Text(name) = &values[1] else {
+            bail!("couldn't parse 1 element: {:?}", values[1]);
+        };
+
+        let Column::Text(tbl_name) = &values[2] else {
+            bail!("couldn't parse 2 element: {:?}", values[2]);
+        };
+
+        let Column::Int(rootpage) = &values[3] else {
+            bail!("couldn't parse 3 element: {:?}", values[3]);
+        };
+
+        let Column::Text(sql_query) = &values[4] else {
+            bail!("couldn't parse 4 element: {:?}", values[4]);
+        };
+
+        let schema = SqliteSchema {
+            ty,
+            name: name.to_owned(),
+            tbl_name: tbl_name.to_owned(),
+            rootpage: *rootpage,
+            sql_query: sql_query.to_owned(),
+        };
+        debug!(?schema, "parsed");
+
+        Ok(schema)
+    }
+
+    pub(crate) fn ty(&self) -> &RecordType {
+        &self.ty
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn tbl_name(&self) -> &str {
+        &self.tbl_name
+    }
+
+    pub(crate) fn rootpage(&self) -> i64 {
+        self.rootpage
+    }
+
+    pub(crate) fn rootpage_index(&self) -> usize {
+        (self.rootpage - 1) as usize
+    }
+
+    pub(crate) fn sql_query(&self) -> &str {
+        &self.sql_query
+    }
 }
 
 /// Table b-tree leaf cell: payload size varint, rowid varint, then the record.
