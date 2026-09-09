@@ -14,7 +14,7 @@ pub(crate) fn run(file: &File, db_hdr: DbHeader) -> anyhow::Result<()> {
 
     let offset: usize = 0;
 
-    let page_header = page_header(page_buf, 0)?;
+    let page_header = page_header(&page_buf, 0)?;
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     eprintln!("Logs from your program will appear here!");
 

@@ -1,4 +1,5 @@
-use tracing::debug;
+use serde::de::value;
+use tracing::{debug, info};
 
 use crate::constants::{DB_HEADER_SIZE, PAGE_SIZE};
 use std::fs::File;
@@ -69,7 +70,7 @@ pub(crate) fn db_header(file: &File) -> anyhow::Result<DbHeader> {
     Ok(DbHeader::new(page_size))
 }
 
-pub(crate) fn page_header(page: Vec<u8>, num_page: usize) -> anyhow::Result<PageHeader> {
+pub(crate) fn page_header(page: &[u8], num_page: usize) -> anyhow::Result<PageHeader> {
     debug!(?num_page, "read page_header");
     let mut offset: usize = 0;
     let mut out: [u8; 12] = [0; 12];
@@ -99,24 +100,73 @@ pub(crate) fn page_header(page: Vec<u8>, num_page: usize) -> anyhow::Result<Page
     Ok(page_header)
 }
 
-pub(crate) fn parse_cell(buf: &mut [u8], mut off: usize) -> anyhow::Result<()> {
-    let (cell_size, n) = varint(&buf[off..])?;
+pub(crate) fn parse_cell(buf: &mut [u8]) -> anyhow::Result<(TableLeafCell, usize)> {
+    let mut off: usize = 0;
+    debug!("start parsing a cell");
+    // parsing cell
+    let (payload_size, n) = varint(&buf)?;
+    // offset where cell ends and starts a new one
     off += n;
-    let (row_id, n) = varint(&buf[off..])?;
-    off += n;
-    let (rec_size, n) = varint(&buf[off..])?;
+    let (rowid, n) = varint(&buf[off..])?;
     off += n;
 
-    while off < (rec_size + off) - n {}
-    let (rec_size, n) = varint(&buf[off..])?;
-    /*
-        TableLeafCell {
-            cell_size,
-            rowid
+    let record_end_off = off + payload_size as usize;
+
+    debug!(
+        ?payload_size,
+        record_size = payload_size + 2,
+        ?rowid,
+        ?off,
+        ?record_end_off,
+        "parsing cell hdr"
+    );
+
+    let (hdr_size, n) = varint(&buf[off..])?;
+    // offset where record hdr ends
+    let record_hdr_end_off = off + hdr_size as usize;
+    off += n;
+    let mut serial_types: Vec<SerialType> = vec![];
+
+    debug!(?off, ?record_hdr_end_off, "start parsing columns types");
+    // parsing record header
+    while off < record_hdr_end_off {
+        let (s_type, n) = varint(&buf[off..])?;
+        let serial_type = SerialType::try_from(s_type)?;
+        serial_types.push(serial_type);
+        off += n;
+    }
+    debug!(?serial_types);
+
+    let rec_hdr = RecordHdr::new(hdr_size as usize, serial_types);
+
+    debug!(?rec_hdr, "start parsing column values");
+
+    let mut values: Vec<Column> = Vec::with_capacity(rec_hdr.serial_types.len());
+    for &s_type in &rec_hdr.serial_types {
+        if off >= record_end_off {
+            return Err(anyhow::anyhow!(
+                "parse_cell go out of the current record offset"
+            ));
         }
-    */
-    todo!()
+        let (col, n) = Column::parse(&buf[off..], s_type)?;
+        values.push(col);
+        off += n;
+    }
+
+    info!(?values);
+
+    let record = Record {
+        hdr: rec_hdr,
+        values,
+    };
+    let cell_parsed = TableLeafCell {
+        cell_size: payload_size,
+        rowid,
+        record,
+    };
+    Ok((cell_parsed, off))
 }
+
 pub(crate) fn read_page(
     file: &File,
     buf: &mut [u8],
@@ -212,14 +262,57 @@ impl TryFrom<u64> for SerialType {
     }
 }
 
+impl TryFrom<i64> for SerialType {
+    type Error = anyhow::Error;
+
+    fn try_from(code: i64) -> Result<Self, Self::Error> {
+        SerialType::try_from(code as u64)
+    }
+}
+
 /// One decoded column. All integer widths collapse to i64, matching sqlite's own model.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Value {
+pub(crate) enum Column {
     Null,
     Int(i64),
     Float(f64),
     Blob(Vec<u8>),
     Text(String),
+}
+
+impl Column {
+    /// Decodes one column at the start of `buf`. Returns (column, bytes consumed).
+    pub(crate) fn parse(buf: &[u8], s_type: SerialType) -> anyhow::Result<(Column, usize)> {
+        let n = s_type.size();
+        let bytes = buf
+            .get(..n)
+            .ok_or_else(|| anyhow::anyhow!("column needs {n} bytes, only {} left", buf.len()))?;
+
+        let col = match s_type {
+            SerialType::Null => Column::Null,
+            SerialType::Zero => Column::Int(0),
+            SerialType::One => Column::Int(1),
+            SerialType::I8
+            | SerialType::I16
+            | SerialType::I24
+            | SerialType::I32
+            | SerialType::I48
+            | SerialType::I64 => Column::Int(int_be(bytes)),
+            SerialType::F64 => Column::Float(f64::from_be_bytes(bytes.try_into()?)),
+            SerialType::Blob(_) => Column::Blob(bytes.to_vec()),
+            SerialType::Text(_) => Column::Text(String::from_utf8(bytes.to_vec())?),
+        };
+        Ok((col, n))
+    }
+}
+
+/// Big-endian two's-complement integer of 1..=8 bytes, sign-extended to i64.
+fn int_be(bytes: &[u8]) -> i64 {
+    let raw = bytes.iter().fold(0u64, |acc, &b| (acc << 8) | b as u64);
+    // Park the value in the top bits, then arithmetic-shift back down so the
+    // sign bit of the original width becomes the sign bit of the i64.
+    let unused = 64 - 8 * bytes.len() as u32;
+    ((raw << unused) as i64) >> unused
 }
 
 /// One row: the record header's serial types applied to the body, in column order.
@@ -229,9 +322,19 @@ pub(crate) struct RecordHdr {
     serial_types: Vec<SerialType>,
 }
 
+impl RecordHdr {
+    pub(crate) fn new(hdr_size: usize, serial_types: Vec<SerialType>) -> Self {
+        Self {
+            hdr_size,
+            serial_types,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Record {
-    pub(crate) values: Vec<Value>,
+    pub(crate) hdr: RecordHdr,
+    pub(crate) values: Vec<Column>,
 }
 
 /// Table b-tree leaf cell: payload size varint, rowid varint, then the record.
@@ -245,7 +348,32 @@ pub(crate) struct TableLeafCell {
 
 #[cfg(test)]
 mod tests {
-    use super::SerialType;
+    use super::{Column, SerialType, varint};
+
+    #[test]
+    fn column_parse() {
+        assert_eq!(
+            Column::parse(&[0xff], SerialType::I8).unwrap(),
+            (Column::Int(-1), 1)
+        );
+        assert_eq!(
+            Column::parse(&[0x01, 0x00], SerialType::I16).unwrap(),
+            (Column::Int(256), 2)
+        );
+        assert_eq!(
+            Column::parse(&[0x7f], SerialType::I8).unwrap(),
+            (Column::Int(127), 1)
+        );
+        assert_eq!(
+            Column::parse(b"tablexyz", SerialType::Text(5)).unwrap(),
+            (Column::Text("table".into()), 5)
+        );
+        assert_eq!(
+            Column::parse(&[], SerialType::Zero).unwrap(),
+            (Column::Int(0), 0)
+        );
+        assert!(Column::parse(&[0x00], SerialType::I32).is_err());
+    }
 
     #[test]
     fn varint_spec_examples() {
@@ -260,11 +388,11 @@ mod tests {
     #[test]
     fn serial_type_matches_spec_example() {
         // From the sample.db "oranges" cell: 17 1b 1b 01 81 47
-        assert_eq!(SerialType::try_from(23).unwrap(), SerialType::Text(5));
-        assert_eq!(SerialType::try_from(27).unwrap(), SerialType::Text(7));
-        assert_eq!(SerialType::try_from(1).unwrap().size(), 1);
-        assert_eq!(SerialType::try_from(199).unwrap(), SerialType::Text(93));
-        assert_eq!(SerialType::try_from(12).unwrap(), SerialType::Blob(0));
-        assert!(SerialType::try_from(10).is_err());
+        assert_eq!(SerialType::try_from(23u64).unwrap(), SerialType::Text(5));
+        assert_eq!(SerialType::try_from(27u64).unwrap(), SerialType::Text(7));
+        assert_eq!(SerialType::try_from(1u64).unwrap().size(), 1);
+        assert_eq!(SerialType::try_from(199u64).unwrap(), SerialType::Text(93));
+        assert_eq!(SerialType::try_from(12u64).unwrap(), SerialType::Blob(0));
+        assert!(SerialType::try_from(10u64).is_err());
     }
 }
