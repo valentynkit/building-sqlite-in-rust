@@ -16,12 +16,12 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn logging_init(default_filter: &str) {
-    println!("default_filter:{}", default_filter);
     tracing_subscriber::fmt()
         .with_env_filter(
             // RUST_LOG still wins, so you can raise verbosity without editing config.
             EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into()),
         )
         .with_timer(time::uptime())
+        .with_writer(std::io::stderr)
         .init();
 }

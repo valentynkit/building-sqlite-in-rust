@@ -38,7 +38,7 @@ pub(crate) fn run(
         debug!(offset = ptr, "start parsing cell");
         let (_cell, _) = parse_cell(&page_buf[(ptr as usize)..])?;
     }
-    let out = if *second_arg == "COUNT(*)" {
+    let out = if second_arg.eq_ignore_ascii_case("count(*)") {
         format!("{}", page_header.cell_count())
     } else {
         "Uknown second argument".into()
