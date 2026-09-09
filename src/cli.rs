@@ -17,6 +17,8 @@ pub enum Command {
     DbInfo,
     #[command(name = ".tables")]
     Tables,
+    #[command(external_subcommand)]
+    SqlQuery(Vec<String>),
 }
 
 impl Display for Command {
@@ -24,6 +26,10 @@ impl Display for Command {
         match self {
             Command::DbInfo => write!(f, ".dbinfo"),
             Command::Tables => write!(f, ".tables"),
+            Command::SqlQuery(args) => {
+                let query = args.join(" ");
+                write!(f, "query")
+            }
         }
     }
 }
