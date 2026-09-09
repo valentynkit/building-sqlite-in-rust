@@ -1,8 +1,7 @@
-use anyhow::bail;
-use serde::de::value;
 use tracing::{debug, info};
 
-use crate::constants::{DB_HEADER_SIZE, PAGE_SIZE};
+use crate::constants::DB_HEADER_SIZE;
+use crate::error::FormatError;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
@@ -57,7 +56,7 @@ pub(crate) enum PageType {
 }
 
 impl TryFrom<u8> for PageType {
-    type Error = anyhow::Error;
+    type Error = FormatError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -65,11 +64,11 @@ impl TryFrom<u8> for PageType {
             0x05 => Ok(PageType::InteriorTable),
             0x0a => Ok(PageType::LeafIndex),
             0x0d => Ok(PageType::LeafTable),
-            b => anyhow::bail!("invalid page type: {b:#x}"),
+            b => Err(FormatError::PageType(b)),
         }
     }
 }
-pub(crate) fn db_header(file: &File) -> anyhow::Result<DbHeader> {
+pub(crate) fn db_header(file: &File) -> Result<DbHeader, FormatError> {
     let mut db_header: [u8; 100] = [0; 100];
     file.read_exact_at(&mut db_header, 0)?;
 
@@ -78,7 +77,7 @@ pub(crate) fn db_header(file: &File) -> anyhow::Result<DbHeader> {
     Ok(DbHeader::new(page_size))
 }
 
-pub(crate) fn page_header(page: &[u8], num_page: usize) -> anyhow::Result<PageHeader> {
+pub(crate) fn page_header(page: &[u8], num_page: usize) -> Result<PageHeader, FormatError> {
     debug!(?num_page, "read page_header");
     let mut offset: usize = 0;
     let mut out: [u8; 12] = [0; 12];
@@ -108,7 +107,7 @@ pub(crate) fn page_header(page: &[u8], num_page: usize) -> anyhow::Result<PageHe
     Ok(page_header)
 }
 
-pub(crate) fn parse_cell(buf: &[u8]) -> anyhow::Result<(TableLeafCell, usize)> {
+pub(crate) fn parse_cell(buf: &[u8]) -> Result<(TableLeafCell, usize), FormatError> {
     let mut off: usize = 0;
     debug!("start parsing a cell");
     // parsing cell
@@ -152,7 +151,7 @@ pub(crate) fn parse_cell(buf: &[u8]) -> anyhow::Result<(TableLeafCell, usize)> {
     let mut values: Vec<Column> = Vec::with_capacity(rec_hdr.serial_types.len());
     for &s_type in &rec_hdr.serial_types {
         if off >= record_end_off {
-            bail!("parse_cell go out of the current record offset");
+            return Err(FormatError::RecordOverrun);
         }
         let (col, n) = Column::parse(&buf[off..], s_type)?;
         values.push(col);
@@ -178,23 +177,21 @@ pub(crate) fn read_page(
     buf: &mut [u8],
     page_size: u16,
     page_num: usize,
-) -> anyhow::Result<()> {
+) -> Result<(), FormatError> {
     let offset = page_size as usize * page_num;
     debug!(?offset, ?page_size, ?page_num, "loading the page");
     file.read_exact_at(buf, offset as u64)?;
     Ok(())
 }
 
-pub(crate) fn varint(buf: &[u8]) -> anyhow::Result<(i64, usize)> {
+pub(crate) fn varint(buf: &[u8]) -> Result<(i64, usize), FormatError> {
     const MORE_FOLLOWS: u8 = 0b1000_0000; // top bit
     const PAYLOAD: u8 = 0b0111_1111; // low 7 bits
 
     let mut value: u64 = 0;
     let mut i = 0;
     while i < 8 {
-        let byte = *buf
-            .get(i)
-            .ok_or_else(|| anyhow::anyhow!("truncated variant"))?;
+        let byte = *buf.get(i).ok_or_else(|| FormatError::Varint)?;
         let payload = (byte & PAYLOAD) as u64;
         value = (value << 7) | payload; // make room for 7 bits, append them
         i += 1;
@@ -203,9 +200,7 @@ pub(crate) fn varint(buf: &[u8]) -> anyhow::Result<(i64, usize)> {
         }
     }
 
-    let byte = *buf
-        .get(8)
-        .ok_or_else(|| anyhow::anyhow!("truncated varint"))?;
+    let byte = *buf.get(8).ok_or_else(|| FormatError::Varint)?;
     value = (value << 8) | byte as u64;
     Ok((value as i64, 9))
 }
@@ -247,7 +242,7 @@ impl SerialType {
 }
 
 impl TryFrom<u64> for SerialType {
-    type Error = anyhow::Error;
+    type Error = FormatError;
 
     fn try_from(code: u64) -> Result<Self, Self::Error> {
         Ok(match code {
@@ -261,7 +256,7 @@ impl TryFrom<u64> for SerialType {
             7 => Self::F64,
             8 => Self::Zero,
             9 => Self::One,
-            10 | 11 => anyhow::bail!("reserved serial type: {code}"),
+            10 | 11 => return Err(FormatError::SerialType(code)),
             n if n % 2 == 0 => Self::Blob(((n - 12) / 2) as usize),
             n => Self::Text(((n - 13) / 2) as usize),
         })
@@ -269,10 +264,10 @@ impl TryFrom<u64> for SerialType {
 }
 
 impl TryFrom<i64> for SerialType {
-    type Error = anyhow::Error;
+    type Error = FormatError;
 
     fn try_from(code: i64) -> Result<Self, Self::Error> {
-        SerialType::try_from(code as u64)
+        SerialType::try_from(code as u64).map_err(|item| FormatError::SerialType(code as u64))
     }
 }
 
@@ -288,26 +283,29 @@ pub(crate) enum Column {
 
 impl Column {
     /// Decodes one column at the start of `buf`. Returns (column, bytes consumed).
-    pub(crate) fn parse(buf: &[u8], s_type: SerialType) -> anyhow::Result<(Column, usize)> {
+    pub(crate) fn parse(buf: &[u8], s_type: SerialType) -> Result<(Column, usize), FormatError> {
         let n = s_type.size();
-        let bytes = buf
-            .get(..n)
-            .ok_or_else(|| anyhow::anyhow!("column needs {n} bytes, only {} left", buf.len()))?;
+
+        let bytes = buf.get(..n).ok_or(FormatError::Trucated {
+            need: n,
+            have: buf.len(),
+        })?;
 
         let col = match s_type {
-            SerialType::Null => Column::Null,
-            SerialType::Zero => Column::Int(0),
-            SerialType::One => Column::Int(1),
+            SerialType::Null => Self::Null,
+            SerialType::Zero => Self::Int(0),
+            SerialType::One => Self::Int(1),
             SerialType::I8
             | SerialType::I16
             | SerialType::I24
             | SerialType::I32
             | SerialType::I48
-            | SerialType::I64 => Column::Int(int_be(bytes)),
-            SerialType::F64 => Column::Float(f64::from_be_bytes(bytes.try_into()?)),
-            SerialType::Blob(_) => Column::Blob(bytes.to_vec()),
-            SerialType::Text(_) => Column::Text(String::from_utf8(bytes.to_vec())?),
+            | SerialType::I64 => Self::Int(int_be(bytes)),
+            SerialType::F64 => Self::Float(f64::from_bits(int_be(bytes) as u64)),
+            SerialType::Blob(_) => Self::Blob(bytes.to_vec()),
+            SerialType::Text(_) => Self::Text(String::from_utf8(bytes.to_vec())?),
         };
+
         Ok((col, n))
     }
 }
@@ -351,44 +349,51 @@ pub(crate) struct SqliteSchema {
     rootpage: i64,
     sql_query: String,
 }
+fn text(index: usize, col: Column) -> Result<String, FormatError> {
+    match col {
+        Column::Text(s) => Ok(s),
+        got => Err(FormatError::SchemaColumn {
+            index,
+            expected: "Text",
+            got,
+        }),
+    }
+}
+
+fn int(index: usize, col: Column) -> Result<i64, FormatError> {
+    match col {
+        Column::Int(i) => Ok(i),
+        got => Err(FormatError::SchemaColumn {
+            index,
+            expected: "Int",
+            got,
+        }),
+    }
+}
 
 impl SqliteSchema {
-    pub(crate) fn parse(values: Vec<Column>) -> anyhow::Result<SqliteSchema> {
-        if values.len() != 5 {
-            bail!("expected values len to be 5, got {}", values.len());
-        }
-        let Column::Text(type_str) = &values[0] else {
-            bail!("couldn't parse 0 element: {:?}", values[0]);
-        };
-        let ty = match type_str.as_str() {
+    pub(crate) fn parse(values: Vec<Column>) -> Result<SqliteSchema, FormatError> {
+        let [ty, name, tbl_name, rootpage, sql_query]: [Column; 5] =
+            values
+                .try_into()
+                .map_err(|v: Vec<Column>| FormatError::Schema {
+                    exp_len: 5,
+                    actual_len: v.len(),
+                })?;
+
+        let ty = match text(0, ty)?.as_str() {
             "table" => RecordType::Table,
             "index" => RecordType::Index,
-            _ => bail!("couldn't parse 0 element {:?}", type_str),
+            str => return Err(FormatError::UknownRecordType(str.to_owned())),
         };
-
-        let Column::Text(name) = &values[1] else {
-            bail!("couldn't parse 1 element: {:?}", values[1]);
-        };
-
-        let Column::Text(tbl_name) = &values[2] else {
-            bail!("couldn't parse 2 element: {:?}", values[2]);
-        };
-
-        let Column::Int(rootpage) = &values[3] else {
-            bail!("couldn't parse 3 element: {:?}", values[3]);
-        };
-
-        let Column::Text(sql_query) = &values[4] else {
-            bail!("couldn't parse 4 element: {:?}", values[4]);
-        };
-
         let schema = SqliteSchema {
             ty,
-            name: name.to_owned(),
-            tbl_name: tbl_name.to_owned(),
-            rootpage: *rootpage,
-            sql_query: sql_query.to_owned(),
+            name: text(1, name)?,
+            tbl_name: text(2, tbl_name)?,
+            rootpage: int(3, rootpage)?,
+            sql_query: text(4, sql_query)?,
         };
+
         debug!(?schema, "parsed");
 
         Ok(schema)
