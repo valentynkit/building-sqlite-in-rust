@@ -1,7 +1,7 @@
-use std::fs::File;
+use std::{fmt::format, fs::File};
 
 use anyhow::bail;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     commands::helpers::{
@@ -17,7 +17,7 @@ pub(crate) fn run(
     query: Vec<String>,
 ) -> Result<String, QueryError> {
     assert_eq!(query.len(), 1, "query should be one element");
-    let query = (&query[0]).to_owned();
+    let query = (&query[0]).to_owned().to_ascii_lowercase();
 
     info!(%query, "executing sql");
     let malformed = |reason: &str| QueryError::Malformed {
@@ -25,13 +25,14 @@ pub(crate) fn run(
         reason: reason.to_owned(),
     };
 
+    let query = query
+        .strip_prefix("select")
+        .ok_or(malformed("expected `SELECT <...>"))?;
+
     let tokens: Vec<&str> = query.split_whitespace().collect();
-    let &[select, what, .., from, tbl_name] = tokens.as_slice() else {
+    let [what @ .., from, tbl_name] = tokens.as_slice() else {
         return Err(malformed("expected `SELECT <expr> FROM <table>`"));
     };
-    if !select.eq_ignore_ascii_case("select") {
-        return Err(malformed("expected SELECT"));
-    }
 
     if !from.eq_ignore_ascii_case("from") {
         return Err(malformed("expected SELECT"));
@@ -39,8 +40,8 @@ pub(crate) fn run(
 
     let table = schemas
         .iter()
-        .find(|s| s.tbl_name() == tbl_name)
-        .ok_or(QueryError::NoSuchTable(tbl_name.to_owned()))?;
+        .find(|s| s.tbl_name() == *tbl_name)
+        .ok_or(QueryError::NoSuchTable((*tbl_name).to_owned()))?;
 
     debug!(?table);
     let page_size = db_hdr.page_size();
@@ -54,24 +55,38 @@ pub(crate) fn run(
         cells.push(cell);
     }
 
-    let out = match what.to_ascii_lowercase().as_str() {
-        "count(*)" => format!("{}", page_header.cell_count()),
-        s => {
-            let Some(idx) = table.sql_parsed().get(what) else {
-                return Err(QueryError::NoSuchColumn(s.to_owned()));
-            };
-            let mut values: Vec<String> = vec![];
-            for cell in cells {
-                let value = cell
-                    .record
-                    .values
-                    .get(*idx)
-                    .ok_or(QueryError::NoSuchColumn(format!("{idx}")))?;
-                values.push(value.to_string());
-            }
-            values.join("\n")
+    if what.len() == 1 && what[0].eq_ignore_ascii_case("count(*)") {
+        return Ok(cells.len().to_string());
+    }
+
+    let mut out: Vec<String> = vec![String::new(); cells.len() * what.len()];
+    for (idx_col, &col) in what.iter().enumerate() {
+        let col = col
+            .to_ascii_lowercase()
+            .trim_matches(|c: char| c.is_whitespace() || c == ',')
+            .to_owned();
+
+        let Some(&t_idx) = table.sql_parsed().get(&col) else {
+            return Err(QueryError::NoSuchColumn(col.to_owned()));
+        };
+
+        for (idx_row, row) in cells.iter().enumerate() {
+            let value = row
+                .record
+                .values
+                .get(t_idx)
+                .ok_or(QueryError::NoSuchColumn(col.clone()))?;
+
+            let idx = idx_col + (idx_row * what.len());
+            out[idx] = value.to_string();
         }
-    };
+    }
+
+    let out = out
+        .chunks(what.len())
+        .map(|row| row.join("|"))
+        .collect::<Vec<String>>()
+        .join("\n");
 
     Ok(out)
 }
