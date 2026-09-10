@@ -4,8 +4,10 @@ use anyhow::bail;
 use tracing::{debug, info};
 
 use crate::{
-    commands::helpers::{DbHeader, SqliteSchema, page_header, parse_cell, read_page},
-    error::QueryError,
+    commands::helpers::{
+        DbHeader, SqliteSchema, TableLeafCell, page_header, parse_cell, read_page,
+    },
+    error::{FormatError, QueryError},
 };
 
 pub(crate) fn run(
@@ -34,23 +36,42 @@ pub(crate) fn run(
     if !from.eq_ignore_ascii_case("from") {
         return Err(malformed("expected SELECT"));
     }
+
     let table = schemas
         .iter()
         .find(|s| s.tbl_name() == tbl_name)
         .ok_or(QueryError::NoSuchTable(tbl_name.to_owned()))?;
+
     debug!(?table);
     let page_size = db_hdr.page_size();
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(&file, &mut page_buf, page_size, table.rootpage_index())?;
     let page_header = page_header(&page_buf, table.rootpage_index())?;
+    let mut cells: Vec<TableLeafCell> = Vec::with_capacity(page_header.cell_count() as usize);
 
     for &ptr in page_header.cell_pointers() {
-        let (_cell, _) = parse_cell(&page_buf[(ptr as usize)..])?;
+        let (cell, _) = parse_cell(&page_buf[(ptr as usize)..])?;
+        cells.push(cell);
     }
+
     let out = match what.to_ascii_lowercase().as_str() {
-        "count(*)" => Ok(format!("{}", page_header.cell_count())),
-        s => Err(QueryError::Unsupported(s.to_owned())),
-    }?;
+        "count(*)" => format!("{}", page_header.cell_count()),
+        s => {
+            let Some(idx) = table.sql_parsed().get(what) else {
+                return Err(QueryError::NoSuchColumn(s.to_owned()));
+            };
+            let mut values: Vec<String> = vec![];
+            for cell in cells {
+                let value = cell
+                    .record
+                    .values
+                    .get(*idx)
+                    .ok_or(QueryError::NoSuchColumn(format!("{idx}")))?;
+                values.push(value.to_string());
+            }
+            values.join("\n")
+        }
+    };
 
     Ok(out)
 }

@@ -2,8 +2,13 @@ use tracing::{debug, info};
 
 use crate::constants::DB_HEADER_SIZE;
 use crate::error::FormatError;
+use crate::sql_query;
+use std::collections::HashMap;
+use std::fmt::Display;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
+
+pub type Result<T, E = FormatError> = core::result::Result<T, E>;
 
 pub(crate) struct DbHeader {
     page_size: u16,
@@ -68,7 +73,7 @@ impl TryFrom<u8> for PageType {
         }
     }
 }
-pub(crate) fn db_header(file: &File) -> Result<DbHeader, FormatError> {
+pub(crate) fn db_header(file: &File) -> Result<DbHeader> {
     let mut db_header: [u8; 100] = [0; 100];
     file.read_exact_at(&mut db_header, 0)?;
 
@@ -77,7 +82,7 @@ pub(crate) fn db_header(file: &File) -> Result<DbHeader, FormatError> {
     Ok(DbHeader::new(page_size))
 }
 
-pub(crate) fn page_header(page: &[u8], num_page: usize) -> Result<PageHeader, FormatError> {
+pub(crate) fn page_header(page: &[u8], num_page: usize) -> Result<PageHeader> {
     debug!(?num_page, "read page_header");
     let mut offset: usize = 0;
     let mut out: [u8; 12] = [0; 12];
@@ -107,7 +112,7 @@ pub(crate) fn page_header(page: &[u8], num_page: usize) -> Result<PageHeader, Fo
     Ok(page_header)
 }
 
-pub(crate) fn parse_cell(buf: &[u8]) -> Result<(TableLeafCell, usize), FormatError> {
+pub(crate) fn parse_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
     let mut off: usize = 0;
     debug!("start parsing a cell");
     // parsing cell
@@ -177,14 +182,14 @@ pub(crate) fn read_page(
     buf: &mut [u8],
     page_size: u16,
     page_num: usize,
-) -> Result<(), FormatError> {
+) -> Result<()> {
     let offset = page_size as usize * page_num;
     debug!(?offset, ?page_size, ?page_num, "loading the page");
     file.read_exact_at(buf, offset as u64)?;
     Ok(())
 }
 
-pub(crate) fn varint(buf: &[u8]) -> Result<(i64, usize), FormatError> {
+pub(crate) fn varint(buf: &[u8]) -> Result<(i64, usize)> {
     const MORE_FOLLOWS: u8 = 0b1000_0000; // top bit
     const PAYLOAD: u8 = 0b0111_1111; // low 7 bits
 
@@ -281,9 +286,21 @@ pub(crate) enum Column {
     Text(String),
 }
 
+impl Display for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Column::Null => write!(f, "NULL"),
+            Column::Int(i) => write!(f, "{i}"),
+            Column::Float(float) => write!(f, "{float}"),
+            Column::Text(s) => f.write_str(s),
+            Column::Blob(b) => write!(f, "<blob {} bytes>", b.len()),
+        }
+    }
+}
+
 impl Column {
     /// Decodes one column at the start of `buf`. Returns (column, bytes consumed).
-    pub(crate) fn parse(buf: &[u8], s_type: SerialType) -> Result<(Column, usize), FormatError> {
+    pub(crate) fn parse(buf: &[u8], s_type: SerialType) -> Result<(Column, usize)> {
         let n = s_type.size();
 
         let bytes = buf.get(..n).ok_or(FormatError::Trucated {
@@ -348,8 +365,12 @@ pub(crate) struct SqliteSchema {
     tbl_name: String,
     rootpage: i64,
     sql_query: String,
+    // map of columns name to index from sql query, so we could use it when parsing the rows and
+    // getting specific columns by index having only the names of columns.
+    sql_parsed: HashMap<String, usize>,
 }
-fn text(index: usize, col: Column) -> Result<String, FormatError> {
+
+fn text(index: usize, col: Column) -> Result<String> {
     match col {
         Column::Text(s) => Ok(s),
         got => Err(FormatError::SchemaColumn {
@@ -360,7 +381,7 @@ fn text(index: usize, col: Column) -> Result<String, FormatError> {
     }
 }
 
-fn int(index: usize, col: Column) -> Result<i64, FormatError> {
+fn int(index: usize, col: Column) -> Result<i64> {
     match col {
         Column::Int(i) => Ok(i),
         got => Err(FormatError::SchemaColumn {
@@ -371,8 +392,57 @@ fn int(index: usize, col: Column) -> Result<i64, FormatError> {
     }
 }
 
+fn parse_sql(query: &str, tbl_name: &str) -> Result<HashMap<String, usize>> {
+    let query = query.to_ascii_lowercase();
+
+    let uknown_sql = |expected: &str, got: &str| FormatError::UknownSql {
+        expected: expected.to_owned(),
+        got: got.to_owned(),
+    };
+
+    let query_start = format!("create table");
+    if !query.starts_with(query_start.as_str()) {
+        return Err(FormatError::UknownSql {
+            got: query,
+            expected: query_start,
+        });
+    }
+
+    debug!(?query, ?tbl_name, "parsed sql");
+    let open = query.find('(').ok_or_else(|| uknown_sql("(", ""))?;
+    let close = query.find(')').ok_or_else(|| uknown_sql(")", ""))?;
+
+    if open >= close {
+        return Err(uknown_sql(
+            "(...)",
+            &format!("`(` at {open} after `)` at {close}"),
+        ));
+    }
+
+    let inside_parentheses = &query[open + 1..close];
+
+    debug!(?inside_parentheses);
+    let mut out: HashMap<String, usize> = HashMap::new();
+    let columns: Vec<&str> = inside_parentheses.split(',').map(str::trim).collect();
+
+    debug!(?columns);
+    for (idx, sub_str) in columns.iter().enumerate() {
+        let item = sub_str
+            .split_whitespace()
+            .next()
+            .ok_or(FormatError::UknownSql {
+                expected: "column name".to_owned(),
+                got: "None".to_owned(),
+            })?;
+        out.insert(item.to_owned(), idx);
+    }
+
+    debug!(?out);
+    Ok(out)
+}
+
 impl SqliteSchema {
-    pub(crate) fn parse(values: Vec<Column>) -> Result<SqliteSchema, FormatError> {
+    pub(crate) fn parse(values: Vec<Column>) -> Result<Self> {
         let [ty, name, tbl_name, rootpage, sql_query]: [Column; 5] =
             values
                 .try_into()
@@ -386,12 +456,18 @@ impl SqliteSchema {
             "index" => RecordType::Index,
             str => return Err(FormatError::UknownRecordType(str.to_owned())),
         };
-        let schema = SqliteSchema {
+        let sql_query = text(4, sql_query)?;
+        let tbl_name = text(2, tbl_name)?;
+
+        let sql_parsed = parse_sql(&sql_query, &tbl_name)?;
+
+        let schema = Self {
             ty,
             name: text(1, name)?,
-            tbl_name: text(2, tbl_name)?,
+            tbl_name,
             rootpage: int(3, rootpage)?,
-            sql_query: text(4, sql_query)?,
+            sql_query,
+            sql_parsed,
         };
 
         debug!(?schema, "parsed");
@@ -421,6 +497,10 @@ impl SqliteSchema {
 
     pub(crate) fn sql_query(&self) -> &str {
         &self.sql_query
+    }
+
+    pub(crate) fn sql_parsed(&self) -> &HashMap<String, usize> {
+        &self.sql_parsed
     }
 }
 
