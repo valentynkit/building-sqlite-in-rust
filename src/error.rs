@@ -1,4 +1,4 @@
-use std::io;
+use std::{array::TryFromSliceError, io};
 
 use thiserror::Error;
 
@@ -33,6 +33,8 @@ pub enum FormatError {
     Schema { exp_len: usize, actual_len: usize },
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Parse(#[from] TryFromSliceError),
 }
 
 /// Bad or unsupported user input. sql_query.rs
@@ -48,4 +50,6 @@ pub enum QueryError {
     Unsupported(String),
     #[error(transparent)]
     Format(#[from] FormatError),
+    #[error(transparent)]
+    Parse(#[from] TryFromSliceError),
 }

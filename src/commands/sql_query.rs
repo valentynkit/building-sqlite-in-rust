@@ -5,7 +5,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     commands::helpers::{
-        DbHeader, SqliteSchema, TableLeafCell, page_header, parse_cell, read_page,
+        DbHeader, PageType, SqliteSchema, TableLeafCell, page_header, parse_leaf_cell, read_page,
     },
     error::{FormatError, QueryError},
 };
@@ -144,6 +144,46 @@ fn tokenize(query: &str) -> Result<Vec<&str>> {
     }
     Ok(tokens)
 }
+fn walk(
+    file: &File,
+    page_num: usize,
+    keep: &dyn Fn(&TableLeafCell) -> bool,
+    cells: &mut Vec<TableLeafCell>,
+    db_hdr: &DbHeader,
+    table: &SqliteSchema,
+) -> Result<()> {
+    let page_size = db_hdr.page_size();
+    let mut page_buf = vec![0u8; page_size as usize];
+    read_page(&file, &mut page_buf, page_size, page_num)?;
+    let page_header = page_header(&page_buf, page_num)?;
+    let page_type = page_header.page_type();
+
+    match page_type {
+        PageType::LeafTable => {
+            for &ptr in page_header.cell_pointers() {
+                let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
+                if keep(&cell) {
+                    cells.push(cell);
+                }
+            }
+        }
+        PageType::InteriorTable => {
+            for &ptr in page_header.cell_pointers() {
+                let ptr = ptr as usize;
+                let child = (u32::from_be_bytes(page_buf[ptr..ptr + 4].try_into()?) - 1) as usize;
+                walk(file, child, keep, cells, db_hdr, table)?;
+            }
+            let Some(right_child) = page_header.right_most_child() else {
+                return Err(FormatError::PageType(PageType::InteriorTable.into()).into());
+            };
+            walk(file, (right_child - 1) as usize, keep, cells, db_hdr, table)?;
+        }
+        PageType::LeafIndex | PageType::InteriorIndex => {
+            unimplemented!("index traversing unimplemented!")
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn run(
     file: &File,
@@ -197,30 +237,34 @@ pub(crate) fn run(
     let page_header = page_header(&page_buf, table.rootpage_index())?;
     let mut cells: Vec<TableLeafCell> = Vec::with_capacity(page_header.cell_count() as usize);
 
-    for &ptr in page_header.cell_pointers() {
-        let (cell, _) = parse_cell(&page_buf[(ptr as usize)..])?;
-        // Every condition must hold (AND); no conditions keeps the row.
-        let mut meet_conditions = true;
-        for (col, expected_value) in &conditions {
-            let Some(&col_idx) = table.sql_parsed().get(&col.to_ascii_lowercase()) else {
-                return Err(QueryError::NoSuchColumn((*col).to_owned()));
-            };
+    let conditions: Vec<(usize, &str)> = conditions
+        .iter()
+        .map(|(col, expected)| {
+            table
+                .sql_parsed()
+                .get(&col.to_ascii_lowercase())
+                .map(|&idx| (idx, *expected))
+                .ok_or_else(|| QueryError::NoSuchColumn((*col).to_owned()))
+        })
+        .collect::<Result<_>>()?;
 
-            let actual_value = cell
-                .record
+    let keep = |cell: &TableLeafCell| {
+        conditions.iter().all(|&(idx, expected)| {
+            cell.record
                 .values
-                .get(col_idx)
-                .ok_or(QueryError::NoSuchColumn((*col).to_owned()))?;
+                .get(idx)
+                .is_some_and(|v| v.to_string() == expected)
+        })
+    };
 
-            if &actual_value.to_string() != expected_value {
-                meet_conditions = false;
-                break;
-            }
-        }
-        if meet_conditions {
-            cells.push(cell);
-        }
-    }
+    walk(
+        file,
+        table.rootpage_index(),
+        &keep,
+        &mut cells,
+        &db_hdr,
+        table,
+    );
 
     if what.len() == 1 && what[0].eq_ignore_ascii_case("count(*)") {
         return Ok(cells.len().to_string());

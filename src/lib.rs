@@ -12,7 +12,7 @@ use tracing::{debug, info};
 
 use crate::commands::{
     dbinfo,
-    helpers::{SqliteSchema, db_header, page_header, parse_cell, read_page},
+    helpers::{SqliteSchema, db_header, page_header, parse_leaf_cell, read_page},
     sql_query, tables,
 };
 
@@ -43,7 +43,7 @@ fn parse_sqlite_schemas(page_buf: &[u8]) -> anyhow::Result<Vec<SqliteSchema>> {
 
     for &ptr in page_header.cell_pointers() {
         debug!(offset = ptr, "start parsing cell");
-        let (cell, _) = parse_cell(&page_buf[(ptr as usize)..])?;
+        let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
         schemas.push(SqliteSchema::parse(cell.record.values)?);
     }
 

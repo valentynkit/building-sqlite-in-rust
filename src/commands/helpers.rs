@@ -1,4 +1,5 @@
-use tracing::{debug, info};
+use anyhow::bail;
+use tracing::{debug, error, info};
 
 use crate::constants::DB_HEADER_SIZE;
 use crate::error::FormatError;
@@ -28,21 +29,51 @@ pub(crate) struct PageHeader {
     page_type: PageType,
     cell_count: u16,
     cell_pointers: Vec<u16>,
+    right_most_child: Option<u32>,
 }
 
 impl PageHeader {
-    pub(crate) fn new(page_type: PageType, cell_count: u16, cell_ptrs: Vec<u16>) -> PageHeader {
-        PageHeader {
+    pub(crate) fn new(
+        page_type: PageType,
+        cell_count: u16,
+        cell_pointers: Vec<u16>,
+        right_most_child: Option<u32>,
+    ) -> Result<PageHeader> {
+        match page_type {
+            PageType::LeafIndex | PageType::LeafTable => {
+                if let Some(x) = right_most_child {
+                    error!("Leaf pages shouldn't have right_most_child");
+                    return Err(FormatError::PageType(page_type.into()));
+                }
+            }
+            PageType::InteriorIndex | PageType::InteriorTable => {
+                if let None = right_most_child {
+                    error!("Interior pages should have right_most_child");
+                    return Err(FormatError::PageType(page_type.into()));
+                }
+            }
+        }
+
+        Ok(PageHeader {
             page_type,
             cell_count,
-            cell_pointers: cell_ptrs,
-        }
+            cell_pointers,
+            right_most_child,
+        })
     }
     pub(crate) fn cell_count(&self) -> u16 {
         self.cell_count
     }
     pub(crate) fn cell_pointers(&self) -> &Vec<u16> {
         &self.cell_pointers
+    }
+
+    pub(crate) fn page_type(&self) -> &PageType {
+        &self.page_type
+    }
+
+    pub(crate) fn right_most_child(&self) -> Option<u32> {
+        self.right_most_child
     }
 }
 
@@ -73,6 +104,17 @@ impl TryFrom<u8> for PageType {
         }
     }
 }
+
+impl From<PageType> for u8 {
+    fn from(value: PageType) -> Self {
+        match value {
+            PageType::InteriorIndex => 0x02,
+            PageType::InteriorTable => 0x05,
+            PageType::LeafIndex => 0x0a,
+            PageType::LeafTable => 0x0d,
+        }
+    }
+}
 pub(crate) fn db_header(file: &File) -> Result<DbHeader> {
     let mut db_header: [u8; 100] = [0; 100];
     file.read_exact_at(&mut db_header, 0)?;
@@ -82,24 +124,26 @@ pub(crate) fn db_header(file: &File) -> Result<DbHeader> {
     Ok(DbHeader::new(page_size))
 }
 
-pub(crate) fn page_header(page: &[u8], num_page: usize) -> Result<PageHeader> {
-    debug!(?num_page, "read page_header");
-    let mut offset: usize = 0;
-    let mut out: [u8; 12] = [0; 12];
-    if num_page == 0 {
-        offset += DB_HEADER_SIZE;
-    }
-    let page_type = PageType::try_from(page[offset])?;
+pub(crate) fn page_header(page: &[u8], page_num: usize) -> Result<PageHeader> {
+    debug!(?page_num, "read page_header");
+    // Page 1 carries the 100-byte file header before its b-tree header.
+    let hdr_start = if page_num == 0 { DB_HEADER_SIZE } else { 0 };
+    let page_type = PageType::try_from(page[hdr_start])?;
+    let cell_count = u16::from_be_bytes([page[hdr_start + 3], page[hdr_start + 4]]);
 
-    let len: usize = match page_type {
-        PageType::LeafIndex | PageType::LeafTable => 8,
-        PageType::InteriorIndex | PageType::InteriorTable => 12,
+    // Interior headers are 12 bytes: the extra 4 at offset 8 are the right-most child.
+    let (len, right_most_child) = match page_type {
+        PageType::LeafIndex | PageType::LeafTable => (8, None),
+        PageType::InteriorIndex | PageType::InteriorTable => (
+            12,
+            Some(u32::from_be_bytes(
+                page[hdr_start + 8..hdr_start + 12].try_into()?,
+            )),
+        ),
     };
 
-    let cell_count = u16::from_be_bytes([page[offset + 3], page[offset + 4]]);
+    let mut offset = hdr_start + len;
     let mut cell_ptrs: Vec<u16> = Vec::with_capacity(cell_count as usize);
-
-    offset += len;
     for cell_n in 0..cell_count {
         let cell_ptr = u16::from_be_bytes([page[offset], page[offset + 1]]);
         debug!(?offset, ?cell_n, ?cell_ptr, "parsing cell pointers");
@@ -107,12 +151,12 @@ pub(crate) fn page_header(page: &[u8], num_page: usize) -> Result<PageHeader> {
         offset += 2;
     }
 
-    let page_header = PageHeader::new(page_type, cell_count, cell_ptrs);
+    let page_header = PageHeader::new(page_type, cell_count, cell_ptrs, right_most_child)?;
     debug!(?page_header, "parsed");
     Ok(page_header)
 }
 
-pub(crate) fn parse_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
+pub(crate) fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
     let mut off: usize = 0;
     debug!("start parsing a cell");
     // parsing cell
