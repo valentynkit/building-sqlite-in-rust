@@ -124,6 +124,27 @@ fn parse_query<'a>(
     Ok(())
 }
 
+/// Splits on whitespace, except a single-quoted literal stays one token, quotes included.
+/// `a = 'New York'` -> ["a", "=", "'New York'"]
+fn tokenize(query: &str) -> Result<Vec<&str>> {
+    let mut tokens = vec![];
+    let mut rest = query.trim_start();
+    while !rest.is_empty() {
+        let end = if rest.starts_with('\'') {
+            let close = rest[1..].find('\'').ok_or_else(|| QueryError::Malformed {
+                query: query.to_owned(),
+                reason: "unterminated string literal".to_owned(),
+            })?;
+            close + 2 // past the opening and closing quote
+        } else {
+            rest.find(char::is_whitespace).unwrap_or(rest.len())
+        };
+        tokens.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    Ok(tokens)
+}
+
 pub(crate) fn run(
     file: &File,
     schemas: Vec<SqliteSchema>,
@@ -145,7 +166,7 @@ pub(crate) fn run(
         .map(|_| &query[6..])
         .ok_or_else(|| malformed("expected `SELECT <...>`"))?;
 
-    let tokens: Vec<&str> = query.split_whitespace().collect();
+    let tokens = tokenize(query)?;
     let mut what: Vec<&str> = vec![];
     let mut from: Vec<&str> = vec![];
     // could be empty, column = expected value.
@@ -235,4 +256,19 @@ pub(crate) fn run(
         .join("\n");
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokenize;
+
+    #[test]
+    fn tokenize_keeps_quoted_literal_whole() {
+        assert_eq!(
+            tokenize("  name from t where city = 'New York'  ").unwrap(),
+            ["name", "from", "t", "where", "city", "=", "'New York'"]
+        );
+        assert_eq!(tokenize("a\t'x'\n").unwrap(), ["a", "'x'"]);
+        assert!(tokenize("a = 'oops").is_err());
+    }
 }
