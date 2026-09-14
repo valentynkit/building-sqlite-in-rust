@@ -5,7 +5,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     commands::helpers::{
-        DbHeader, PageType, SqliteSchema, TableLeafCell, page_header, parse_leaf_cell, read_page,
+        Column, DbHeader, PageType, SqliteSchema, TableLeafCell, page_header, parse_leaf_cell,
+        read_page,
     },
     error::{FormatError, QueryError},
 };
@@ -161,7 +162,13 @@ fn walk(
     match page_type {
         PageType::LeafTable => {
             for &ptr in page_header.cell_pointers() {
-                let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
+                let (mut cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
+                if let Some(v) = table
+                    .rowid_alias()
+                    .and_then(|i| cell.record.values.get_mut(i))
+                {
+                    *v = Column::Int(cell.rowid);
+                }
                 if keep(&cell) {
                     cells.push(cell);
                 }
@@ -264,7 +271,7 @@ pub(crate) fn run(
         &mut cells,
         &db_hdr,
         table,
-    );
+    )?;
 
     if what.len() == 1 && what[0].eq_ignore_ascii_case("count(*)") {
         return Ok(cells.len().to_string());

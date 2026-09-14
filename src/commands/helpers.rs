@@ -197,7 +197,8 @@ pub(crate) fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
 
     let mut values: Vec<Column> = Vec::with_capacity(rec_hdr.serial_types.len());
     for &s_type in &rec_hdr.serial_types {
-        if off >= record_end_off {
+        // Zero-width types (NULL, 0, 1) may sit exactly at the end of the record.
+        if off + s_type.size() > record_end_off {
             return Err(FormatError::RecordOverrun);
         }
         let (col, n) = Column::parse(&buf[off..], s_type)?;
@@ -410,6 +411,8 @@ pub(crate) struct SqliteSchema {
     // map of columns name to index from sql query, so we could use it when parsing the rows and
     // getting specific columns by index having only the names of columns.
     sql_parsed: HashMap<String, usize>,
+    // `integer primary key` column: stored as NULL in the record, its value is the rowid.
+    rowid_alias: Option<usize>,
 }
 
 fn text(index: usize, col: Column) -> Result<String> {
@@ -434,7 +437,7 @@ fn int(index: usize, col: Column) -> Result<i64> {
     }
 }
 
-fn parse_sql(query: &str, tbl_name: &str) -> Result<HashMap<String, usize>> {
+fn parse_sql(query: &str, tbl_name: &str) -> Result<(HashMap<String, usize>, Option<usize>)> {
     let query = query.to_ascii_lowercase();
 
     let uknown_sql = |expected: &str, got: &str| FormatError::UknownSql {
@@ -465,6 +468,7 @@ fn parse_sql(query: &str, tbl_name: &str) -> Result<HashMap<String, usize>> {
 
     debug!(?inside_parentheses);
     let mut out: HashMap<String, usize> = HashMap::new();
+    let mut rowid_alias = None;
     let columns: Vec<&str> = inside_parentheses.split(',').map(str::trim).collect();
 
     debug!(?columns);
@@ -477,10 +481,13 @@ fn parse_sql(query: &str, tbl_name: &str) -> Result<HashMap<String, usize>> {
                 got: "None".to_owned(),
             })?;
         out.insert(item.to_owned(), idx);
+        if sub_str.contains("integer primary key") {
+            rowid_alias = Some(idx);
+        }
     }
 
-    debug!(?out);
-    Ok(out)
+    debug!(?out, ?rowid_alias);
+    Ok((out, rowid_alias))
 }
 
 impl SqliteSchema {
@@ -501,7 +508,7 @@ impl SqliteSchema {
         let sql_query = text(4, sql_query)?;
         let tbl_name = text(2, tbl_name)?;
 
-        let sql_parsed = parse_sql(&sql_query, &tbl_name)?;
+        let (sql_parsed, rowid_alias) = parse_sql(&sql_query, &tbl_name)?;
 
         let schema = Self {
             ty,
@@ -510,6 +517,7 @@ impl SqliteSchema {
             rootpage: int(3, rootpage)?,
             sql_query,
             sql_parsed,
+            rowid_alias,
         };
 
         debug!(?schema, "parsed");
@@ -543,6 +551,10 @@ impl SqliteSchema {
 
     pub(crate) fn sql_parsed(&self) -> &HashMap<String, usize> {
         &self.sql_parsed
+    }
+
+    pub(crate) fn rowid_alias(&self) -> Option<usize> {
+        self.rowid_alias
     }
 }
 
