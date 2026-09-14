@@ -39,7 +39,7 @@ impl QuerySection {
             Self::From => ("FROM", &["select", "from"]),
             Self::Where => ("WHERE", &["select", "from", "where"]),
         };
-        if forbidden.contains(&token) {
+        if forbidden.contains(&token.to_ascii_lowercase().as_str()) {
             return Err(QueryError::Malformed {
                 query: query.to_owned(),
                 reason: format!("{section} section shouldn't contain {token}"),
@@ -69,7 +69,7 @@ fn parse_query<'a>(
         query_section.validate(query, token)?;
         match query_section {
             QuerySection::Select => {
-                if token == "from" {
+                if token.eq_ignore_ascii_case("from") {
                     if what.is_empty() {
                         return Err(malformed(
                             "expected > 0 items after SELECT, got 0. `SELECT FROM ...`",
@@ -81,7 +81,7 @@ fn parse_query<'a>(
                 what.push(token);
             }
             QuerySection::From => {
-                if token == "where" {
+                if token.eq_ignore_ascii_case("where") {
                     if from.is_empty() {
                         return Err(malformed(
                             "expected > 0 items after FROM, got 0. `SELECT <...> FROM WHERE`",
@@ -114,7 +114,7 @@ fn parse_query<'a>(
                 return Err(malformed("WHERE expects `<col> = <value>`"));
             }
 
-            conditions.push((col, value));
+            conditions.push((col, value.trim_matches('\'')));
 
             debug!(?col, ?condition, ?value, "parsing WHERE section");
         }
@@ -130,8 +130,7 @@ pub(crate) fn run(
     db_hdr: DbHeader,
     query: Vec<String>,
 ) -> Result<String> {
-    assert_eq!(query.len(), 1, "query should be one element");
-    let query = (&query[0]).to_owned().to_ascii_lowercase();
+    let query = query.join(" ");
 
     info!(%query, "executing sql");
     let malformed = |reason: &str| QueryError::Malformed {
@@ -139,9 +138,12 @@ pub(crate) fn run(
         reason: reason.to_owned(),
     };
 
+    // Case matters inside string literals, so only the keyword is matched case-insensitively.
     let query = query
-        .strip_prefix("select")
-        .ok_or(malformed("expected `SELECT <...>"))?;
+        .get(..6)
+        .filter(|kw| kw.eq_ignore_ascii_case("select"))
+        .map(|_| &query[6..])
+        .ok_or_else(|| malformed("expected `SELECT <...>`"))?;
 
     let tokens: Vec<&str> = query.split_whitespace().collect();
     let mut what: Vec<&str> = vec![];
@@ -164,7 +166,7 @@ pub(crate) fn run(
 
     let table = schemas
         .iter()
-        .find(|s| s.tbl_name() == tbl_name)
+        .find(|s| s.tbl_name().eq_ignore_ascii_case(tbl_name))
         .ok_or(QueryError::NoSuchTable((tbl_name).to_owned()))?;
 
     debug!(?table);
@@ -176,9 +178,10 @@ pub(crate) fn run(
 
     for &ptr in page_header.cell_pointers() {
         let (cell, _) = parse_cell(&page_buf[(ptr as usize)..])?;
-        let mut meet_conditions = false;
+        // Every condition must hold (AND); no conditions keeps the row.
+        let mut meet_conditions = true;
         for (col, expected_value) in &conditions {
-            let Some(&col_idx) = table.sql_parsed().get(*col) else {
+            let Some(&col_idx) = table.sql_parsed().get(&col.to_ascii_lowercase()) else {
                 return Err(QueryError::NoSuchColumn((*col).to_owned()));
             };
 
@@ -188,8 +191,9 @@ pub(crate) fn run(
                 .get(col_idx)
                 .ok_or(QueryError::NoSuchColumn((*col).to_owned()))?;
 
-            if &actual_value.to_string() == expected_value {
-                meet_conditions = true;
+            if &actual_value.to_string() != expected_value {
+                meet_conditions = false;
+                break;
             }
         }
         if meet_conditions {
