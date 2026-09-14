@@ -5,4 +5,4 @@ server:
   port: 3000
 
 telemetry:
-  log_filter: "codecrafters_sqlite=debug,tower_http=debug,axum=debug"
+  log_filter: "codecrafters_sqlite=info"

@@ -146,7 +146,6 @@ pub(crate) fn page_header(page: &[u8], page_num: usize) -> Result<PageHeader> {
     let mut cell_ptrs: Vec<u16> = Vec::with_capacity(cell_count as usize);
     for cell_n in 0..cell_count {
         let cell_ptr = u16::from_be_bytes([page[offset], page[offset + 1]]);
-        debug!(?offset, ?cell_n, ?cell_ptr, "parsing cell pointers");
         cell_ptrs.push(cell_ptr);
         offset += 2;
     }
@@ -158,7 +157,6 @@ pub(crate) fn page_header(page: &[u8], page_num: usize) -> Result<PageHeader> {
 
 pub(crate) fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
     let mut off: usize = 0;
-    debug!("start parsing a cell");
     // parsing cell
     let (payload_size, n) = varint(&buf)?;
     // offset where cell ends and starts a new one
@@ -207,7 +205,7 @@ pub(crate) fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
         off += n;
     }
 
-    info!(?values);
+    debug!(?values);
 
     let record = Record {
         hdr: rec_hdr,
