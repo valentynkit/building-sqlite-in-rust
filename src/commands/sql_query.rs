@@ -5,8 +5,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     commands::helpers::{
-        Column, DbHeader, PageType, SqliteSchema, TableLeafCell, page_header, parse_leaf_cell,
-        read_page,
+        Column, DbHeader, PageType, RecordType, SqliteSchema, TableLeafCell, page_header,
+        parse_leaf_cell, read_page,
     },
     error::{FormatError, QueryError},
 };
@@ -145,6 +145,7 @@ fn tokenize(query: &str) -> Result<Vec<&str>> {
     }
     Ok(tokens)
 }
+
 fn walk(
     file: &File,
     page_num: usize,
@@ -159,14 +160,21 @@ fn walk(
     let page_header = page_header(&page_buf, page_num)?;
     let page_type = page_header.page_type();
 
+    let RecordType::Table {
+        parsed_columns: _,
+        rowid_alias,
+    } = table.ty()
+    else {
+        return Err(QueryError::NoSuchTable(
+            "<Couldn't get tbl_name>".to_string(),
+        ));
+    };
+
     match page_type {
         PageType::LeafTable => {
             for &ptr in page_header.cell_pointers() {
                 let (mut cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
-                if let Some(v) = table
-                    .rowid_alias()
-                    .and_then(|i| cell.record.values.get_mut(i))
-                {
+                if let Some(v) = rowid_alias.and_then(|i| cell.record.values.get_mut(i)) {
                     *v = Column::Int(cell.rowid);
                 }
                 if keep(&cell) {
@@ -232,23 +240,65 @@ pub(crate) fn run(
     }
     let tbl_name = from[0];
 
-    let table = schemas
+    // we may have several schema for the same tbl_name, for example:
+    // 1 for table, and 3 for indexes for this table.
+    let records: Vec<&SqliteSchema> = schemas
         .iter()
-        .find(|s| s.tbl_name().eq_ignore_ascii_case(tbl_name))
-        .ok_or(QueryError::NoSuchTable((tbl_name).to_owned()))?;
+        .filter(|s| s.tbl_name().eq_ignore_ascii_case(tbl_name))
+        .collect();
 
-    debug!(?table);
+    if records.is_empty() {
+        return Err(QueryError::NoSuchTable((tbl_name).to_owned()));
+    }
+    let mut table_schema: Option<&SqliteSchema> = None;
+    let mut index_schemas: Vec<&SqliteSchema> = vec![];
+    for record in records {
+        match record.ty() {
+            RecordType::Table {
+                parsed_columns: _,
+                rowid_alias: _,
+            } => {
+                if let Some(table_schema) = table_schema {
+                    return Err(QueryError::DuplicatedTable(
+                        table_schema.tbl_name().to_owned(),
+                    ));
+                }
+                table_schema = Some(record);
+            }
+            RecordType::Index { col_name: _ } => {
+                index_schemas.push(record);
+            }
+        }
+    }
+
+    let Some(table_schema) = table_schema else {
+        return Err(QueryError::NoSuchTable(tbl_name.to_owned()));
+    };
+
+    let RecordType::Table {
+        parsed_columns,
+        rowid_alias: _,
+    } = table_schema.ty()
+    else {
+        return Err(QueryError::NoSuchTable(tbl_name.to_owned()));
+    };
+
+    debug!(?table_schema, ?index_schemas);
     let page_size = db_hdr.page_size();
     let mut page_buf = vec![0u8; page_size as usize];
-    read_page(&file, &mut page_buf, page_size, table.rootpage_index())?;
-    let page_header = page_header(&page_buf, table.rootpage_index())?;
+    read_page(
+        &file,
+        &mut page_buf,
+        page_size,
+        table_schema.rootpage_index(),
+    )?;
+    let page_header = page_header(&page_buf, table_schema.rootpage_index())?;
     let mut cells: Vec<TableLeafCell> = Vec::with_capacity(page_header.cell_count() as usize);
 
     let conditions: Vec<(usize, &str)> = conditions
         .iter()
         .map(|(col, expected)| {
-            table
-                .sql_parsed()
+            parsed_columns
                 .get(&col.to_ascii_lowercase())
                 .map(|&idx| (idx, *expected))
                 .ok_or_else(|| QueryError::NoSuchColumn((*col).to_owned()))
@@ -266,11 +316,11 @@ pub(crate) fn run(
 
     walk(
         file,
-        table.rootpage_index(),
+        table_schema.rootpage_index(),
         &keep,
         &mut cells,
         &db_hdr,
-        table,
+        table_schema,
     )?;
 
     if what.len() == 1 && what[0].eq_ignore_ascii_case("count(*)") {
@@ -284,7 +334,7 @@ pub(crate) fn run(
             .trim_matches(|c: char| c.is_whitespace() || c == ',')
             .to_owned();
 
-        let Some(&t_idx) = table.sql_parsed().get(&col) else {
+        let Some(&t_idx) = parsed_columns.get(&col) else {
             return Err(QueryError::NoSuchColumn(col.to_owned()));
         };
 
