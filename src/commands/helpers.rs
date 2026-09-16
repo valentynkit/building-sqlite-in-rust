@@ -77,10 +77,32 @@ impl PageHeader {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RecordType {
-    Table,
-    Index,
+    Table {
+        // map of columns name to index from sql query, so we could use it when parsing the rows and
+        // getting specific columns by index having only the names of columns.
+        parsed_columns: HashMap<String, usize>,
+        // `integer primary key` column: stored as NULL in the record, its value is the rowid.
+        rowid_alias: Option<usize>,
+    },
+    Index {
+        col_name: String,
+    },
+}
+
+impl Display for RecordType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Table {
+                parsed_columns: _parsed_columns,
+                rowid_alias: _rowid_alias,
+            } => write!(f, "table"),
+            Self::Index {
+                col_name: _col_name,
+            } => write!(f, "index"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -408,11 +430,6 @@ pub(crate) struct SqliteSchema {
     tbl_name: String,
     rootpage: i64,
     sql_query: String,
-    // map of columns name to index from sql query, so we could use it when parsing the rows and
-    // getting specific columns by index having only the names of columns.
-    sql_parsed: HashMap<String, usize>,
-    // `integer primary key` column: stored as NULL in the record, its value is the rowid.
-    rowid_alias: Option<usize>,
 }
 
 fn text(index: usize, col: Column) -> Result<String> {
@@ -437,23 +454,30 @@ fn int(index: usize, col: Column) -> Result<i64> {
     }
 }
 
-fn parse_sql(query: &str, tbl_name: &str) -> Result<(HashMap<String, usize>, Option<usize>)> {
-    let query = query.to_ascii_lowercase();
+fn parse_index_sql(
+    query: &str,
+    uknown_sql: &impl Fn(&str, &str) -> FormatError,
+) -> Result<RecordType> {
+    let open = query.find('(').ok_or_else(|| uknown_sql("(", ""))?;
+    let close = query.find(')').ok_or_else(|| uknown_sql(")", ""))?;
 
-    let uknown_sql = |expected: &str, got: &str| FormatError::UknownSql {
-        expected: expected.to_owned(),
-        got: got.to_owned(),
-    };
-
-    let query_start = format!("create table");
-    if !query.starts_with(query_start.as_str()) {
-        return Err(FormatError::UknownSql {
-            got: query,
-            expected: query_start,
-        });
+    if open >= close {
+        return Err(uknown_sql(
+            "(...)",
+            &format!("`(` at {open} after `)` at {close}"),
+        ));
     }
 
-    debug!(?query, ?tbl_name, "parsed sql");
+    let inside_parentheses = &query[open + 1..close];
+    Ok(RecordType::Index {
+        col_name: inside_parentheses.to_owned(),
+    })
+}
+
+fn parse_table_sql(
+    query: &str,
+    uknown_sql: &impl Fn(&str, &str) -> FormatError,
+) -> Result<RecordType> {
     let open = query.find('(').ok_or_else(|| uknown_sql("(", ""))?;
     let close = query.find(')').ok_or_else(|| uknown_sql(")", ""))?;
 
@@ -467,7 +491,7 @@ fn parse_sql(query: &str, tbl_name: &str) -> Result<(HashMap<String, usize>, Opt
     let inside_parentheses = &query[open + 1..close];
 
     debug!(?inside_parentheses);
-    let mut out: HashMap<String, usize> = HashMap::new();
+    let mut parsed_columns: HashMap<String, usize> = HashMap::new();
     let mut rowid_alias = None;
     let columns: Vec<&str> = inside_parentheses.split(',').map(str::trim).collect();
 
@@ -480,14 +504,19 @@ fn parse_sql(query: &str, tbl_name: &str) -> Result<(HashMap<String, usize>, Opt
                 expected: "column name".to_owned(),
                 got: "None".to_owned(),
             })?;
-        out.insert(item.to_owned(), idx);
+        parsed_columns.insert(item.to_owned(), idx);
         if sub_str.contains("integer primary key") {
             rowid_alias = Some(idx);
         }
     }
 
-    debug!(?out, ?rowid_alias);
-    Ok((out, rowid_alias))
+    debug!(?parsed_columns, ?rowid_alias);
+    let rec = RecordType::Table {
+        parsed_columns,
+        rowid_alias,
+    };
+
+    Ok(rec)
 }
 
 impl SqliteSchema {
@@ -500,15 +529,32 @@ impl SqliteSchema {
                     actual_len: v.len(),
                 })?;
 
-        let ty = match text(0, ty)?.as_str() {
-            "table" => RecordType::Table,
-            "index" => RecordType::Index,
-            str => return Err(FormatError::UknownRecordType(str.to_owned())),
-        };
         let sql_query = text(4, sql_query)?;
         let tbl_name = text(2, tbl_name)?;
 
-        let (sql_parsed, rowid_alias) = parse_sql(&sql_query, &tbl_name)?;
+        let query = sql_query.to_ascii_lowercase();
+
+        let uknown_sql = |expected: &str, got: &str| FormatError::UknownSql {
+            expected: expected.to_owned(),
+            got: got.to_owned(),
+        };
+
+        let query_start = format!("create {ty}");
+        if !query.starts_with(query_start.as_str()) {
+            return Err(FormatError::UknownSql {
+                got: query,
+                expected: query_start,
+            });
+        }
+        let sql_parsed: HashMap<String, usize> = HashMap::new();
+        let row_id_alias: Option<usize>;
+        debug!(?query, ?tbl_name, "parsed sql");
+
+        let ty = match text(0, ty)?.as_str() {
+            "table" => parse_table_sql(&query, &uknown_sql),
+            "index" => parse_index_sql(&query, &uknown_sql),
+            str => Err(FormatError::UknownRecordType(str.to_owned())),
+        }?;
 
         let schema = Self {
             ty,
@@ -516,8 +562,6 @@ impl SqliteSchema {
             tbl_name,
             rootpage: int(3, rootpage)?,
             sql_query,
-            sql_parsed,
-            rowid_alias,
         };
 
         debug!(?schema, "parsed");
@@ -547,14 +591,6 @@ impl SqliteSchema {
 
     pub(crate) fn sql_query(&self) -> &str {
         &self.sql_query
-    }
-
-    pub(crate) fn sql_parsed(&self) -> &HashMap<String, usize> {
-        &self.sql_parsed
-    }
-
-    pub(crate) fn rowid_alias(&self) -> Option<usize> {
-        self.rowid_alias
     }
 }
 
