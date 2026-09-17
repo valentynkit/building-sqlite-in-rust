@@ -288,6 +288,35 @@ fn parse_table_and_index_schemas<'a>(
     Ok((table_schema, index_schemas))
 }
 
+fn parse_conditions<'a>(
+    conditions: Vec<(&'a str, &'a str)>,
+    parsed_columns: &HashMap<String, usize>,
+    index_schemas: &Vec<&SqliteSchema>,
+) -> Result<(Vec<(usize, &'a str)>, Vec<(usize, &'a str)>)> {
+    let conditions: Vec<(usize, &str)> = conditions
+        .iter()
+        .map(|(col, expected)| {
+            parsed_columns
+                .get(&col.to_ascii_lowercase())
+                .map(|&idx| (idx, *expected))
+                .ok_or_else(|| QueryError::NoSuchColumn((*col).to_owned()))
+        })
+        .collect::<Result<_>>()?;
+
+    let indexed: HashSet<usize> = index_schemas
+        .iter()
+        .filter_map(|s| match s.ty() {
+            RecordType::Index { col_name } => parsed_columns.get(col_name).copied(),
+            _ => None,
+        })
+        .collect();
+
+    let (indexed_conditions, scan_conditions): (Vec<_>, Vec<_>) = conditions
+        .into_iter()
+        .partition(|(idx, _)| indexed.contains(idx));
+    Ok((indexed_conditions, scan_conditions))
+}
+
 pub(crate) fn run(
     file: &File,
     schemas: Vec<SqliteSchema>,
@@ -343,38 +372,10 @@ pub(crate) fn run(
     };
 
     debug!(?table_schema, ?index_schemas);
-    let page_size = db_hdr.page_size();
-    let mut page_buf = vec![0u8; page_size as usize];
-    read_page(
-        &file,
-        &mut page_buf,
-        page_size,
-        table_schema.rootpage_index(),
-    )?;
-    let page_header = page_header(&page_buf, table_schema.rootpage_index())?;
-    let mut cells: Vec<TableLeafCell> = Vec::with_capacity(page_header.cell_count() as usize);
+    let mut cells: Vec<TableLeafCell> = vec![];
 
-    let conditions: Vec<(usize, &str)> = conditions
-        .iter()
-        .map(|(col, expected)| {
-            parsed_columns
-                .get(&col.to_ascii_lowercase())
-                .map(|&idx| (idx, *expected))
-                .ok_or_else(|| QueryError::NoSuchColumn((*col).to_owned()))
-        })
-        .collect::<Result<_>>()?;
-
-    let indexed: HashSet<usize> = index_schemas
-        .iter()
-        .filter_map(|s| match s.ty() {
-            RecordType::Index { col_name } => parsed_columns.get(col_name).copied(),
-            _ => None,
-        })
-        .collect();
-
-    let (indexed_conditions, scan_conditions): (Vec<_>, Vec<_>) = conditions
-        .into_iter()
-        .partition(|(idx, _)| indexed.contains(idx));
+    let (indexed_conditions, scan_conditions) =
+        parse_conditions(conditions, parsed_columns, &index_schemas)?;
 
     let keep = |cell: &TableLeafCell| {
         scan_conditions.iter().all(|&(idx, expected)| {
