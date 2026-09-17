@@ -1,7 +1,11 @@
-use std::{collections::HashMap, fmt::format, fs::File};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::format,
+    fs::File,
+};
 
 use anyhow::bail;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     commands::helpers::{
@@ -146,6 +150,53 @@ fn tokenize(query: &str) -> Result<Vec<&str>> {
     Ok(tokens)
 }
 
+fn walk_index(
+    file: &File,
+    page_num: usize,
+    keep: &dyn Fn(&TableLeafCell) -> bool,
+    cells: &mut Vec<TableLeafCell>,
+    db_hdr: &DbHeader,
+    table: &SqliteSchema,
+) -> Result<()> {
+    let page_size = db_hdr.page_size();
+    let mut page_buf = vec![0u8; page_size as usize];
+    read_page(&file, &mut page_buf, page_size, page_num)?;
+    let page_header = page_header(&page_buf, page_num)?;
+    let page_type = page_header.page_type();
+
+    let RecordType::Index { col_name } = table.ty() else {
+        error!("expected to have RecordType::Index");
+        return Err(QueryError::NoSuchTable(
+            "<Couldn't get tbl_name>".to_string(),
+        ));
+    };
+
+    match page_type {
+        PageType::LeafIndex => {
+            for &ptr in page_header.cell_pointers() {
+                let (mut cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
+                cells.push(cell);
+            }
+        }
+        PageType::InteriorIndex => {
+            for &ptr in page_header.cell_pointers() {
+                let ptr = ptr as usize;
+                let child = (u32::from_be_bytes(page_buf[ptr..ptr + 4].try_into()?) - 1) as usize;
+                walk_index(file, child, keep, cells, db_hdr, table)?;
+            }
+            let Some(right_child) = page_header.right_most_child() else {
+                error!("no right child found for InteriorIndex");
+                return Err(FormatError::PageType(PageType::InteriorIndex.into()).into());
+            };
+            walk_index(file, (right_child - 1) as usize, keep, cells, db_hdr, table)?;
+        }
+        PageType::LeafTable | PageType::InteriorTable => {
+            unimplemented!("index traversing unimplemented!")
+        }
+    }
+    Ok(())
+}
+
 fn walk(
     file: &File,
     page_num: usize,
@@ -200,6 +251,43 @@ fn walk(
     Ok(())
 }
 
+fn parse_table_and_index_schemas<'a>(
+    schemas: &'a Vec<SqliteSchema>,
+    tbl_name: &str,
+) -> Result<(Option<&'a SqliteSchema>, Vec<&'a SqliteSchema>)> {
+    // we may have several schema for the same tbl_name, for example:
+    // 1 for table, and 3 for indexes for this table.
+    let records: Vec<&SqliteSchema> = schemas
+        .iter()
+        .filter(|s| s.tbl_name().eq_ignore_ascii_case(tbl_name))
+        .collect();
+
+    if records.is_empty() {
+        return Err(QueryError::NoSuchTable((tbl_name).to_owned()));
+    }
+    let mut table_schema: Option<&SqliteSchema> = None;
+    let mut index_schemas: Vec<&SqliteSchema> = vec![];
+    for record in records {
+        match record.ty() {
+            RecordType::Table {
+                parsed_columns: _,
+                rowid_alias: _,
+            } => {
+                if let Some(table_schema) = table_schema {
+                    return Err(QueryError::DuplicatedTable(
+                        table_schema.tbl_name().to_owned(),
+                    ));
+                }
+                table_schema = Some(record);
+            }
+            RecordType::Index { col_name: _ } => {
+                index_schemas.push(record);
+            }
+        }
+    }
+    Ok((table_schema, index_schemas))
+}
+
 pub(crate) fn run(
     file: &File,
     schemas: Vec<SqliteSchema>,
@@ -240,36 +328,7 @@ pub(crate) fn run(
     }
     let tbl_name = from[0];
 
-    // we may have several schema for the same tbl_name, for example:
-    // 1 for table, and 3 for indexes for this table.
-    let records: Vec<&SqliteSchema> = schemas
-        .iter()
-        .filter(|s| s.tbl_name().eq_ignore_ascii_case(tbl_name))
-        .collect();
-
-    if records.is_empty() {
-        return Err(QueryError::NoSuchTable((tbl_name).to_owned()));
-    }
-    let mut table_schema: Option<&SqliteSchema> = None;
-    let mut index_schemas: Vec<&SqliteSchema> = vec![];
-    for record in records {
-        match record.ty() {
-            RecordType::Table {
-                parsed_columns: _,
-                rowid_alias: _,
-            } => {
-                if let Some(table_schema) = table_schema {
-                    return Err(QueryError::DuplicatedTable(
-                        table_schema.tbl_name().to_owned(),
-                    ));
-                }
-                table_schema = Some(record);
-            }
-            RecordType::Index { col_name: _ } => {
-                index_schemas.push(record);
-            }
-        }
-    }
+    let (table_schema, index_schemas) = parse_table_and_index_schemas(&schemas, tbl_name)?;
 
     let Some(table_schema) = table_schema else {
         return Err(QueryError::NoSuchTable(tbl_name.to_owned()));
@@ -305,8 +364,20 @@ pub(crate) fn run(
         })
         .collect::<Result<_>>()?;
 
+    let indexed: HashSet<usize> = index_schemas
+        .iter()
+        .filter_map(|s| match s.ty() {
+            RecordType::Index { col_name } => parsed_columns.get(col_name).copied(),
+            _ => None,
+        })
+        .collect();
+
+    let (indexed_conditions, scan_conditions): (Vec<_>, Vec<_>) = conditions
+        .into_iter()
+        .partition(|(idx, _)| indexed.contains(idx));
+
     let keep = |cell: &TableLeafCell| {
-        conditions.iter().all(|&(idx, expected)| {
+        scan_conditions.iter().all(|&(idx, expected)| {
             cell.record
                 .values
                 .get(idx)
@@ -314,15 +385,42 @@ pub(crate) fn run(
         })
     };
 
-    walk(
-        file,
-        table_schema.rootpage_index(),
-        &keep,
-        &mut cells,
-        &db_hdr,
-        table_schema,
-    )?;
+    let keep_indexes = |cell: &TableLeafCell| {
+        indexed_conditions.iter().all(|&(idx, expected)| {
+            cell.record
+                .values
+                .get(idx)
+                .is_some_and(|v| v.to_string() == expected)
+        })
+    };
+    let mut index_cells: Vec<TableLeafCell> = vec![];
 
+    /// TODO: for sicplicity we just handle first index for now, without composite indexes etc...
+    if !indexed_conditions.is_empty() {
+        // TODO: we are also not handling that index_schemas may contain indexes that doesn't exist
+        // in conditions, ideally we should derive it from indexed_conditions
+        let index = index_schemas[0];
+        // traversing the indexes
+        walk_index(
+            file,
+            index.rootpage_index(),
+            &keep_indexes,
+            &mut index_cells,
+            &db_hdr,
+            table_schema,
+        )?;
+
+        todo!("use indexes cells to walk through and filter on remaining conditions");
+    } else {
+        walk(
+            file,
+            table_schema.rootpage_index(),
+            &keep,
+            &mut cells,
+            &db_hdr,
+            table_schema,
+        )?;
+    }
     if what.len() == 1 && what[0].eq_ignore_ascii_case("count(*)") {
         return Ok(cells.len().to_string());
     }

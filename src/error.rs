@@ -42,7 +42,6 @@ pub enum FormatError {
 pub enum QueryError {
     #[error("no such table: {0}")]
     NoSuchTable(String),
-
     #[error("Table with the same tbl name could be only one: {0}")]
     DuplicatedTable(String),
     #[error("no such column: {0}")]
