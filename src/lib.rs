@@ -26,10 +26,11 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(&file, &mut page_buf, page_size, 0)?;
     let schemas = parse_sqlite_schemas(&page_buf)?;
+    let page_size = db_hdr.page_size();
     let output = match cmd {
         Command::DbInfo => dbinfo::run(&page_buf, db_hdr)?,
         Command::Tables => tables::run(schemas)?,
-        Command::SqlQuery(query) => sql_query::run(&file, schemas, db_hdr, query)?,
+        Command::SqlQuery(query) => sql_query::run(&file, &schemas, page_size, query)?,
         _ => bail!("Missing or invalid command passed: {}", cmd),
     };
 

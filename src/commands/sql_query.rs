@@ -152,25 +152,23 @@ fn tokenize(query: &str) -> Result<Vec<&str>> {
 
 fn walk_index(
     file: &File,
+    page_size: u16,
     page_num: usize,
+    record_type: &RecordType,
     keep: &dyn Fn(&TableLeafCell) -> bool,
     cells: &mut Vec<TableLeafCell>,
-    db_hdr: &DbHeader,
-    table: &SqliteSchema,
 ) -> Result<()> {
-    let page_size = db_hdr.page_size();
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(&file, &mut page_buf, page_size, page_num)?;
     let page_header = page_header(&page_buf, page_num)?;
     let page_type = page_header.page_type();
 
-    let RecordType::Index { col_name } = table.ty() else {
+    let RecordType::Index { col_name } = record_type else {
         error!("expected to have RecordType::Index");
         return Err(QueryError::NoSuchTable(
             "<Couldn't get tbl_name>".to_string(),
         ));
     };
-
     match page_type {
         PageType::LeafIndex => {
             for &ptr in page_header.cell_pointers() {
@@ -182,13 +180,20 @@ fn walk_index(
             for &ptr in page_header.cell_pointers() {
                 let ptr = ptr as usize;
                 let child = (u32::from_be_bytes(page_buf[ptr..ptr + 4].try_into()?) - 1) as usize;
-                walk_index(file, child, keep, cells, db_hdr, table)?;
+                walk_index(file, page_size, child, record_type, keep, cells)?;
             }
             let Some(right_child) = page_header.right_most_child() else {
                 error!("no right child found for InteriorIndex");
                 return Err(FormatError::PageType(PageType::InteriorIndex.into()).into());
             };
-            walk_index(file, (right_child - 1) as usize, keep, cells, db_hdr, table)?;
+            walk_index(
+                file,
+                page_size,
+                (right_child - 1) as usize,
+                record_type,
+                keep,
+                cells,
+            )?;
         }
         PageType::LeafTable | PageType::InteriorTable => {
             unimplemented!("index traversing unimplemented!")
@@ -199,13 +204,12 @@ fn walk_index(
 
 fn walk(
     file: &File,
+    page_size: u16,
     page_num: usize,
+    record_type: &RecordType,
     keep: &dyn Fn(&TableLeafCell) -> bool,
     cells: &mut Vec<TableLeafCell>,
-    db_hdr: &DbHeader,
-    table: &SqliteSchema,
 ) -> Result<()> {
-    let page_size = db_hdr.page_size();
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(&file, &mut page_buf, page_size, page_num)?;
     let page_header = page_header(&page_buf, page_num)?;
@@ -214,7 +218,7 @@ fn walk(
     let RecordType::Table {
         parsed_columns: _,
         rowid_alias,
-    } = table.ty()
+    } = record_type
     else {
         return Err(QueryError::NoSuchTable(
             "<Couldn't get tbl_name>".to_string(),
@@ -237,12 +241,19 @@ fn walk(
             for &ptr in page_header.cell_pointers() {
                 let ptr = ptr as usize;
                 let child = (u32::from_be_bytes(page_buf[ptr..ptr + 4].try_into()?) - 1) as usize;
-                walk(file, child, keep, cells, db_hdr, table)?;
+                walk(file, page_size, child, record_type, keep, cells)?;
             }
             let Some(right_child) = page_header.right_most_child() else {
                 return Err(FormatError::PageType(PageType::InteriorTable.into()).into());
             };
-            walk(file, (right_child - 1) as usize, keep, cells, db_hdr, table)?;
+            walk(
+                file,
+                page_size,
+                (right_child - 1) as usize,
+                record_type,
+                keep,
+                cells,
+            )?;
         }
         PageType::LeafIndex | PageType::InteriorIndex => {
             unimplemented!("index traversing unimplemented!")
@@ -317,10 +328,45 @@ fn parse_conditions<'a>(
     Ok((indexed_conditions, scan_conditions))
 }
 
+fn filter_what_col(
+    cells: Vec<TableLeafCell>,
+    what: Vec<&str>,
+    parsed_columns: &HashMap<String, usize>,
+) -> Result<String> {
+    let mut out: Vec<String> = vec![String::new(); cells.len() * what.len()];
+    for (idx_col, &col) in what.iter().enumerate() {
+        let col = col
+            .to_ascii_lowercase()
+            .trim_matches(|c: char| c.is_whitespace() || c == ',')
+            .to_owned();
+
+        let Some(&t_idx) = parsed_columns.get(&col) else {
+            return Err(QueryError::NoSuchColumn(col.to_owned()));
+        };
+
+        for (idx_row, row) in cells.iter().enumerate() {
+            let value = row
+                .record
+                .values
+                .get(t_idx)
+                .ok_or(QueryError::NoSuchColumn(col.clone()))?;
+
+            let idx = idx_col + (idx_row * what.len());
+            out[idx] = value.to_string();
+        }
+    }
+
+    Ok(out
+        .chunks(what.len())
+        .map(|row| row.join("|"))
+        .collect::<Vec<String>>()
+        .join("\n"))
+}
+
 pub(crate) fn run(
     file: &File,
-    schemas: Vec<SqliteSchema>,
-    db_hdr: DbHeader,
+    schemas: &Vec<SqliteSchema>,
+    page_size: u16,
     query: Vec<String>,
 ) -> Result<String> {
     let query = query.join(" ");
@@ -395,66 +441,37 @@ pub(crate) fn run(
         })
     };
     let mut index_cells: Vec<TableLeafCell> = vec![];
-
     /// TODO: for sicplicity we just handle first index for now, without composite indexes etc...
     if !indexed_conditions.is_empty() {
         // TODO: we are also not handling that index_schemas may contain indexes that doesn't exist
         // in conditions, ideally we should derive it from indexed_conditions
-        let index = index_schemas[0];
+        let index_schema = index_schemas[0];
+
         // traversing the indexes
         walk_index(
             file,
-            index.rootpage_index(),
+            page_size,
+            index_schema.rootpage_index(),
+            index_schema.ty(),
             &keep_indexes,
             &mut index_cells,
-            &db_hdr,
-            table_schema,
         )?;
 
         todo!("use indexes cells to walk through and filter on remaining conditions");
     } else {
         walk(
             file,
+            page_size,
             table_schema.rootpage_index(),
+            table_schema.ty(),
             &keep,
             &mut cells,
-            &db_hdr,
-            table_schema,
         )?;
     }
     if what.len() == 1 && what[0].eq_ignore_ascii_case("count(*)") {
         return Ok(cells.len().to_string());
     }
-
-    let mut out: Vec<String> = vec![String::new(); cells.len() * what.len()];
-    for (idx_col, &col) in what.iter().enumerate() {
-        let col = col
-            .to_ascii_lowercase()
-            .trim_matches(|c: char| c.is_whitespace() || c == ',')
-            .to_owned();
-
-        let Some(&t_idx) = parsed_columns.get(&col) else {
-            return Err(QueryError::NoSuchColumn(col.to_owned()));
-        };
-
-        for (idx_row, row) in cells.iter().enumerate() {
-            let value = row
-                .record
-                .values
-                .get(t_idx)
-                .ok_or(QueryError::NoSuchColumn(col.clone()))?;
-
-            let idx = idx_col + (idx_row * what.len());
-            out[idx] = value.to_string();
-        }
-    }
-
-    let out = out
-        .chunks(what.len())
-        .map(|row| row.join("|"))
-        .collect::<Vec<String>>()
-        .join("\n");
-
+    let out = filter_what_col(cells, what, parsed_columns)?;
     Ok(out)
 }
 
