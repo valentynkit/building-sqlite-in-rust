@@ -15,6 +15,7 @@ pub enum Environment {
 impl Environment {
     const ENV_VAR: &'static str = "APP_ENVIRONMENT";
 
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
@@ -60,19 +61,6 @@ pub enum AppConfigError {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ServerConfig {
-    host: String,
-    port: u16,
-}
-
-impl ServerConfig {
-    pub(crate) fn address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     log_filter: String,
 }
@@ -85,13 +73,13 @@ pub struct AppConfig {
     /// pick the config file.
     #[serde(default)]
     environment: Environment,
-    server: ServerConfig,
     telemetry: TelemetryConfig,
 }
 
 impl AppConfig {
     /// Layered load: `base.yaml`, then `{environment}.yaml`, then `APP_*` env vars.
     /// Later sources win. Env vars nest with `__`, e.g. `APP_SERVER__PORT=9999`.
+    /// # Errors some errors
     pub fn load() -> Result<Self, AppConfigError> {
         let environment = Environment::from_env()?;
         let dir = Self::config_dir();
@@ -134,14 +122,12 @@ impl AppConfig {
         )
     }
 
+    #[must_use]
     pub const fn environment(&self) -> Environment {
         self.environment
     }
 
-    pub(crate) const fn server(&self) -> &ServerConfig {
-        &self.server
-    }
-
+    #[must_use]
     pub fn log_filter(&self) -> &str {
         &self.telemetry.log_filter
     }

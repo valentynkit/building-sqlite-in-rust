@@ -28,7 +28,7 @@ impl Display for Command {
             Command::Tables => write!(f, ".tables"),
             Command::SqlQuery(args) => {
                 let query = args.join(" ");
-                write!(f, "query")
+                write!(f, "{query}")
             }
         }
     }

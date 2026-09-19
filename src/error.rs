@@ -1,8 +1,8 @@
-use std::{array::TryFromSliceError, io};
+use std::{array::TryFromSliceError, io, num::TryFromIntError};
 
 use thiserror::Error;
 
-use crate::commands::helpers::Column;
+use crate::helpers::Column;
 
 /// Corrupt or unsupported on-disk data.
 #[derive(Debug, Error)]
@@ -35,9 +35,11 @@ pub enum FormatError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Parse(#[from] TryFromSliceError),
+    #[error(transparent)]
+    ParseInt(#[from] TryFromIntError),
 }
 
-/// Bad or unsupported user input. sql_query.rs
+/// Bad or unsupported user input. `sql_query.rs`
 #[derive(Debug, Error)]
 pub enum QueryError {
     #[error("no such table: {0}")]
@@ -48,8 +50,6 @@ pub enum QueryError {
     NoSuchColumn(String),
     #[error("{reason}; malformed query: {query}")]
     Malformed { query: String, reason: String },
-    #[error("unsupported: {0}")]
-    Unsupported(String),
     #[error(transparent)]
     Format(#[from] FormatError),
     #[error(transparent)]
