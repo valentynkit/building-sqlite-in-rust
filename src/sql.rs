@@ -6,4 +6,8 @@ mod plan;
 mod resolve;
 mod tokenize;
 
+pub use execute::*;
 pub use parse::*;
+pub use plan::*;
+pub use resolve::*;
+pub use tokenize::*;

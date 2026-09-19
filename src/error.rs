@@ -2,7 +2,10 @@ use std::{array::TryFromSliceError, io, num::TryFromIntError};
 
 use thiserror::Error;
 
-use crate::helpers::Column;
+use crate::{
+    helpers::Column,
+    sql::{Ident, QuerySection, Token},
+};
 
 /// Corrupt or unsupported on-disk data.
 #[derive(Debug, Error)]
@@ -43,13 +46,19 @@ pub enum FormatError {
 #[derive(Debug, Error)]
 pub enum QueryError {
     #[error("no such table: {0}")]
-    NoSuchTable(String),
+    NoSuchTable(Ident),
     #[error("Table with the same tbl name could be only one: {0}")]
-    DuplicatedTable(String),
+    DuplicatedTable(Ident),
     #[error("no such column: {0}")]
-    NoSuchColumn(String),
+    NoSuchColumn(Ident),
     #[error("{reason}; malformed query: {query}")]
     Malformed { query: String, reason: String },
+    #[error("couldn't parse token: {token}, reason: {reason}")]
+    Parser { token: Token, reason: String },
+    #[error("there are no sections after {0}")]
+    QuerySection(QuerySection),
+    #[error("{0} uknown token")]
+    UknownToken(String),
     #[error(transparent)]
     Format(#[from] FormatError),
     #[error(transparent)]
