@@ -44,29 +44,59 @@ impl Display for Symbol {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StringLit(String);
 
+impl Display for StringLit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl StringLit {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
 impl From<String> for StringLit {
     fn from(value: String) -> Self {
-        StringLit(value)
+        Self(value)
     }
 }
 
 impl From<&str> for StringLit {
     fn from(value: &str) -> Self {
-        StringLit::from(value.to_owned())
+        Self::from(value.to_owned())
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct Ident(String);
+impl Ident {
+    pub fn new(value: impl Into<String>) -> Self {
+        let mut s = value.into();
+        s.make_ascii_lowercase();
+        Self(s)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<String> for Ident {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
 impl From<String> for Ident {
     fn from(value: String) -> Self {
-        Ident(value)
+        Self(value)
     }
 }
 
 impl From<&str> for Ident {
     fn from(value: &str) -> Self {
-        Ident::from(value.to_owned())
+        Self::from(value.to_owned())
     }
 }
 
@@ -86,20 +116,21 @@ pub enum Token {
 
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self}")
+        match self {
+            Self::Keyword(k) => write!(f, "{k}"),
+            Self::Ident(i) => write!(f, "{i}"),
+            Self::StringLit(s) => write!(f, "'{s}'"),
+            Self::Symbol(s) => write!(f, "{s}"),
+        }
     }
 }
 
-fn is_ident_start(c: char) -> bool {
+const fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-fn is_ident_char(c: char) -> bool {
+const fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
-}
-fn is_ident(token: &str) -> bool {
-    let mut chars = token.chars();
-    chars.next().is_some_and(is_ident_start) && chars.all(is_ident_char)
 }
 
 impl TryFrom<&str> for Keyword {
@@ -139,7 +170,7 @@ pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
                 let len = rest.find(|c| !is_ident_char(c)).unwrap_or(rest.len());
                 let word = &rest[..len];
                 let token = Keyword::try_from(word)
-                    .map_or_else(|()| Token::Ident(word.to_owned().into()), Token::Keyword);
+                    .map_or_else(|()| Token::Ident(Ident::new(word)), Token::Keyword);
                 (token, len)
             }
             other => return Err(QueryError::UknownToken(other.to_string())),

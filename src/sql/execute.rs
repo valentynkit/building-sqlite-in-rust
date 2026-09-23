@@ -3,20 +3,16 @@ use std::collections::HashMap;
 use crate::{
     error::QueryError,
     helpers::{QueryResult, TableLeafCell},
+    sql::Ident,
 };
 
 pub fn filter_what_col(
     cells: &[TableLeafCell],
-    what: &[&str],
-    parsed_columns: &HashMap<String, usize>,
+    what: &[Ident],
+    parsed_columns: &HashMap<Ident, usize>,
 ) -> QueryResult<String> {
     let mut out: Vec<String> = vec![String::new(); cells.len() * what.len()];
-    for (idx_col, &col) in what.iter().enumerate() {
-        let col = col
-            .to_ascii_lowercase()
-            .trim_matches(|c: char| c.is_whitespace() || c == ',')
-            .to_owned();
-
+    for (idx_col, col) in what.iter().enumerate() {
         let Some(&t_idx) = parsed_columns.get(&col) else {
             return Err(QueryError::NoSuchColumn(col.clone()));
         };

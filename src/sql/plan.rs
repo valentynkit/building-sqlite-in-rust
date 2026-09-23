@@ -2,43 +2,40 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     error::QueryError,
-    helpers::{QueryResult, RecordType, SqliteSchema},
+    helpers::{Column, QueryResult, RecordType, SqliteSchema},
+    sql::{Condition, Ident, StringLit},
 };
 
-pub struct Plan<'a> {
-    pub indexed_conditions: Vec<(usize, &'a str)>,
-    pub scan_conditions: Vec<(usize, &'a str)>,
+pub struct Plan {
+    pub indexed_conditions: Vec<(usize, Column)>,
+    pub scan_conditions: Vec<(usize, Column)>,
 }
 
-pub fn get_columns_schemas<'a>(
+pub fn plan(
     conditions: Vec<Condition>,
-    parsed_columns: &HashMap<String, usize>,
+    parsed_columns: &HashMap<Ident, usize>,
     index_schemas: &[&SqliteSchema],
-) -> QueryResult<Plan<'a>> {
-    let conditions: Vec<(usize, &str)> = conditions
-        .iter()
-        .map(|(col, expected)| {
-            parsed_columns
-                .get(&col.to_ascii_lowercase())
-                .map(|&idx| (idx, *expected))
-                .ok_or_else(|| QueryError::NoSuchColumn((*col).to_owned()))
-        })
-        .collect::<QueryResult<_>>()?;
-
+) -> QueryResult<Plan> {
     let indexed: HashSet<usize> = index_schemas
         .iter()
         .filter_map(|s| match s.ty() {
             RecordType::Index { col_name } => parsed_columns.get(col_name).copied(),
-            RecordType::Table {
-                parsed_columns: _,
-                rowid_alias: _,
-            } => None,
+            RecordType::Table { .. } => None,
         })
         .collect();
 
-    let (indexed_conditions, scan_conditions): (Vec<_>, Vec<_>) = conditions
+    let (indexed_conditions, scan_conditions) = conditions
+        .into_iter()
+        .map(|c| {
+            let idx = *parsed_columns
+                .get(&c.column_name)
+                .ok_or_else(|| QueryError::NoSuchColumn(c.column_name.clone()))?;
+            Ok((idx, c.exp_value))
+        })
+        .collect::<QueryResult<Vec<_>>>()?
         .into_iter()
         .partition(|(idx, _)| indexed.contains(idx));
+
     Ok(Plan {
         indexed_conditions,
         scan_conditions,

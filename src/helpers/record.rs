@@ -3,7 +3,7 @@
 use super::Result;
 use std::{collections::HashMap, fmt::Display};
 
-use crate::{error::FormatError, helpers::int_be};
+use crate::{error::FormatError, helpers::int_be, sql::Ident};
 
 /// Record-format serial type. Spec: `<https://www.sqlite.org/fileformat.html#record_format>`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,12 +149,12 @@ pub enum RecordType {
     Table {
         // map of columns name to index from sql query, so we could use it when parsing the rows and
         // getting specific columns by index having only the names of columns.
-        parsed_columns: HashMap<String, usize>,
+        parsed_columns: HashMap<Ident, usize>,
         // `integer primary key` column: stored as NULL in the record, its value is the rowid.
         rowid_alias: Option<usize>,
     },
     Index {
-        col_name: String,
+        col_name: Ident,
     },
 }
 

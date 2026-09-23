@@ -4,19 +4,30 @@ use crate::{
     sql::Ident,
 };
 
-pub fn parse_table_and_index_schemas<'a>(
+pub struct TableSchemas<'a> {
+    pub table: &'a SqliteSchema,
+    pub indexes: Vec<&'a SqliteSchema>,
+}
+
+impl<'a> TableSchemas<'a> {
+    pub fn new(table: &'a SqliteSchema, indexes: Vec<&'a SqliteSchema>) -> Self {
+        Self { table, indexes }
+    }
+}
+
+pub fn resolve_table_schemas<'a>(
     schemas: &'a [SqliteSchema],
-    tbl_name: Ident,
-) -> QueryResult<(Option<&'a SqliteSchema>, Vec<&'a SqliteSchema>)> {
+    tbl_name: &Ident,
+) -> QueryResult<TableSchemas<'a>> {
     // we may have several schema for the same tbl_name, for example:
     // 1 for table, and 3 for indexes for this table.
     let records: Vec<&SqliteSchema> = schemas
         .iter()
-        .filter(|s| s.tbl_name().eq_ignore_ascii_case(tbl_name))
+        .filter(|s| s.tbl_name() == tbl_name)
         .collect();
 
     if records.is_empty() {
-        return Err(QueryError::NoSuchTable((tbl_name).to_owned()));
+        return Err(QueryError::NoSuchTable(tbl_name.clone()));
     }
     let mut table_schema: Option<&SqliteSchema> = None;
     let mut index_schemas: Vec<&SqliteSchema> = vec![];
@@ -27,9 +38,8 @@ pub fn parse_table_and_index_schemas<'a>(
                 rowid_alias: _,
             } => {
                 if let Some(table_schema) = table_schema {
-                    return Err(QueryError::DuplicatedTable(
-                        table_schema.tbl_name().to_owned(),
-                    ));
+                    let tbl_name = table_schema.tbl_name().clone();
+                    return Err(QueryError::DuplicatedTable(tbl_name));
                 }
                 table_schema = Some(record);
             }
@@ -38,5 +48,11 @@ pub fn parse_table_and_index_schemas<'a>(
             }
         }
     }
-    Ok((table_schema, index_schemas))
+    let Some(table_schema) = table_schema else {
+        return Err(QueryError::NoSuchTable(tbl_name.clone()));
+    };
+
+    let table_schemas = TableSchemas::new(table_schema, index_schemas);
+
+    Ok(table_schemas)
 }

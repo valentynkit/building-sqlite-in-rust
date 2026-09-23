@@ -1,10 +1,10 @@
 use super::Result;
-use crate::helpers::RecordType;
+use crate::{helpers::RecordType, sql::Ident};
 // sqlite_schema, CREATE parsing
 #[derive(Debug)]
 pub struct SqliteSchema {
     ty: RecordType,
-    tbl_name: String,
+    tbl_name: Ident,
     rootpage: i64,
     /*
     name: String,
@@ -13,7 +13,7 @@ pub struct SqliteSchema {
 }
 
 impl SqliteSchema {
-    pub fn new(ty: RecordType, tbl_name: String, rootpage: i64) -> Self {
+    pub fn new(ty: RecordType, tbl_name: Ident, rootpage: i64) -> Self {
         Self {
             ty,
             tbl_name,
@@ -25,7 +25,7 @@ impl SqliteSchema {
         &self.ty
     }
 
-    pub(crate) fn tbl_name(&self) -> &str {
+    pub(crate) fn tbl_name(&self) -> &Ident {
         &self.tbl_name
     }
 
