@@ -94,9 +94,10 @@ pub fn walk_index(
 
     let RecordType::Index { col_name: _ } = record_type else {
         error!("expected to have RecordType::Index");
-        return Err(QueryError::NoSuchTable(
-            "<Couldn't get tbl_name>".to_string(),
-        ));
+        return Err(QueryError::WrongRecordType {
+            expected: "Index".to_owned(),
+            actual: record_type.to_string(),
+        });
     };
     match page_type {
         PageType::LeafIndex => {
@@ -148,9 +149,11 @@ pub fn walk(
         rowid_alias,
     } = record_type
     else {
-        return Err(QueryError::NoSuchTable(
-            "<Couldn't get tbl_name>".to_string(),
-        ));
+        error!("expected to have RecordType::Table");
+        return Err(QueryError::WrongRecordType {
+            expected: "Table".to_owned(),
+            actual: record_type.to_string(),
+        });
     };
 
     match page_type {

@@ -1,9 +1,6 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Display,
-};
+use std::{collections::HashMap, fmt::Display};
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     error::{FormatError, QueryError},
@@ -11,7 +8,7 @@ use crate::{
         Column, QueryResult, RecordType, Result, SqliteSchema, int, page_header, parse_leaf_cell,
         text,
     },
-    sql::{Ident, Keyword, StringLit, Symbol, Token},
+    sql::{Ident, Keyword, Symbol, Token},
 };
 
 /// Used for parsing, during iteration to identify what is the current query section.
@@ -43,7 +40,7 @@ impl Display for QuerySection {
 
 impl QuerySection {
     // State machine, moving to next query section
-    fn next(self) -> QueryResult<Self> {
+    const fn next(self) -> QueryResult<Self> {
         let res = match self {
             Self::Unstarted => Self::Select,
             Self::Select => Self::From,
@@ -81,17 +78,17 @@ pub struct ParsedTokens {
 }
 
 #[derive(Debug)]
-struct Condition {
-    column_name: Ident,
-    symbol: Symbol,
-    exp_value: StringLit,
+pub struct Condition {
+    pub column_name: Ident,
+    pub _symbol: Symbol,
+    pub exp_value: Column,
 }
 
 impl Condition {
-    fn new(column_name: Ident, symbol: Symbol, exp_value: StringLit) -> Self {
+    const fn new(column_name: Ident, _symbol: Symbol, exp_value: Column) -> Self {
         Self {
             column_name,
-            symbol,
+            _symbol,
             exp_value,
         }
     }
@@ -112,7 +109,7 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
         reason: reason.to_owned(),
     };
     let mut tokens = tokens.into_iter();
-    while let Some(token) = tokens.next() {
+    for token in tokens.by_ref() {
         match query_section {
             QuerySection::Unstarted => {
                 let Token::Keyword(keyword) = token else {
@@ -171,7 +168,11 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
                 return Err(malformed("WHERE expects triple tuple `<col> = <value>`"));
             };
 
-            let condition = Condition::new(column_name, Symbol::Equal, exp_value);
+            let condition = Condition::new(
+                column_name,
+                Symbol::Equal,
+                Column::Text(exp_value.into_inner()),
+            );
             debug!(?condition, "parsed query chunk condition");
             conditions.push(condition);
         }
@@ -202,7 +203,7 @@ fn parse_index_sql(
 
     let inside_parentheses = &query[open + 1..close];
     Ok(RecordType::Index {
-        col_name: inside_parentheses.to_owned(),
+        col_name: Ident::new(inside_parentheses),
     })
 }
 
@@ -223,7 +224,7 @@ fn parse_table_sql(
     let inside_parentheses = &query[open + 1..close];
 
     debug!(?inside_parentheses);
-    let mut parsed_columns: HashMap<String, usize> = HashMap::new();
+    let mut parsed_columns: HashMap<Ident, usize> = HashMap::new();
     let mut rowid_alias = None;
     let columns: Vec<&str> = inside_parentheses.split(',').map(str::trim).collect();
 
@@ -232,11 +233,11 @@ fn parse_table_sql(
         let item = sub_str
             .split_whitespace()
             .next()
-            .ok_or(FormatError::UknownSql {
+            .ok_or_else(|| FormatError::UknownSql {
                 expected: "column name".to_owned(),
                 got: "None".to_owned(),
             })?;
-        parsed_columns.insert(item.to_owned(), idx);
+        parsed_columns.insert(Ident::new(item), idx);
         if sub_str.contains("integer primary key") {
             rowid_alias = Some(idx);
         }
@@ -251,7 +252,7 @@ fn parse_table_sql(
     Ok(rec)
 }
 
-pub(crate) fn parse(values: Vec<Column>) -> Result<SqliteSchema> {
+pub fn parse(values: Vec<Column>) -> Result<SqliteSchema> {
     let [ty, _, tbl_name, rootpage, sql_query]: [Column; 5] =
         values
             .try_into()
@@ -261,7 +262,7 @@ pub(crate) fn parse(values: Vec<Column>) -> Result<SqliteSchema> {
             })?;
 
     let sql_query = text(4, sql_query)?;
-    let tbl_name = text(2, tbl_name)?;
+    let tbl_name = Ident::new(text(2, tbl_name)?);
 
     let query = sql_query.to_ascii_lowercase();
 

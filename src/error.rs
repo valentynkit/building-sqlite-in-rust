@@ -1,9 +1,10 @@
 use std::{array::TryFromSliceError, io, num::TryFromIntError};
 
 use thiserror::Error;
+use tracing::span::Record;
 
 use crate::{
-    helpers::Column,
+    helpers::{Column, RecordType},
     sql::{Ident, QuerySection, Token},
 };
 
@@ -47,6 +48,8 @@ pub enum FormatError {
 pub enum QueryError {
     #[error("no such table: {0}")]
     NoSuchTable(Ident),
+    #[error("Wrong RecordType, expected: {expected}, actual: {actual}")]
+    WrongRecordType { actual: String, expected: String },
     #[error("Table with the same tbl name could be only one: {0}")]
     DuplicatedTable(Ident),
     #[error("no such column: {0}")]
