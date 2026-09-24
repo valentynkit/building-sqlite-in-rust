@@ -2,6 +2,7 @@ use clap::Parser;
 use codecrafters_sqlite::config::AppConfig;
 use codecrafters_sqlite::{Cli, run};
 use tracing::info;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::{EnvFilter, fmt::time};
 
 fn main() -> anyhow::Result<()> {
@@ -21,6 +22,8 @@ fn logging_init(default_filter: &str) {
             // RUST_LOG still wins, so you can raise verbosity without editing config.
             EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter.into()),
         )
+        .with_span_events(FmtSpan::CLOSE)
+        .with_target(true)
         .with_timer(time::uptime())
         .with_writer(std::io::stderr)
         .init();

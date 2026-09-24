@@ -24,9 +24,9 @@ pub enum Command {
 impl Display for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Command::DbInfo => write!(f, ".dbinfo"),
-            Command::Tables => write!(f, ".tables"),
-            Command::SqlQuery(args) => {
+            Self::DbInfo => write!(f, ".dbinfo"),
+            Self::Tables => write!(f, ".tables"),
+            Self::SqlQuery(args) => {
                 let query = args.join(" ");
                 write!(f, "{query}")
             }

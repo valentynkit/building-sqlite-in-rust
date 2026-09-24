@@ -1,9 +1,8 @@
 use std::fmt::Display;
 
-use crate::{error::QueryError, helpers::QueryResult};
+use tracing::{info, instrument};
 
-/// Splits on whitespace, except a single-quoted literal stays one token, quotes included.
-/// "a = 'New York'" -> ["a", "=", "'New York'"]
+use crate::{error::QueryError, helpers::QueryResult};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Keyword {
@@ -145,6 +144,7 @@ impl TryFrom<&str> for Keyword {
     }
 }
 
+#[instrument(level = "info", ret, err)]
 pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
     let malformed = |reason: &str| QueryError::Malformed {
         query: query.to_owned(),
@@ -178,5 +178,6 @@ pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
         tokens.push(token);
         rest = rest[len..].trim_start();
     }
+    info!("tokens count: {}", tokens.len());
     Ok(tokens)
 }

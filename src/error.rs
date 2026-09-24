@@ -1,10 +1,9 @@
 use std::{array::TryFromSliceError, io, num::TryFromIntError};
 
 use thiserror::Error;
-use tracing::span::Record;
 
 use crate::{
-    helpers::{Column, RecordType},
+    helpers::Column,
     sql::{Ident, QuerySection, Token},
 };
 

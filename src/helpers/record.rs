@@ -130,7 +130,7 @@ pub struct RecordHdr {
 }
 
 impl RecordHdr {
-    pub(crate) fn new(serial_types: Vec<SerialType>) -> Self {
+    pub(crate) const fn new(serial_types: Vec<SerialType>) -> Self {
         Self { serial_types }
     }
 
@@ -140,7 +140,7 @@ impl RecordHdr {
 }
 
 #[derive(Debug)]
-pub(crate) struct Record {
+pub struct Record {
     pub(crate) values: Vec<Column>,
 }
 
