@@ -1,8 +1,8 @@
 use std::fmt::Display;
 
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
-use crate::{error::QueryError, helpers::QueryResult};
+use crate::error::{QueryError, QueryResult};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Keyword {
@@ -11,24 +11,27 @@ pub enum Keyword {
     Where,
     Count,
 }
-impl Display for Keyword {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let out = match self {
+impl Keyword {
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Select => "SELECT",
             Self::From => "FROM",
             Self::Where => "WHERE",
             Self::Count => "COUNT",
-        };
-        write!(f, "{out}")
+        }
+    }
+}
+
+impl Display for Keyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 // Ident and StringLit should be seperate, ident could be case ignored, lower cased, while StringLit
 // should stay exactly the same as it was
 
-const SYMBOLS_LIST: [char; 5] = [',', '=', '(', ')', '*'];
-
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Symbol {
     Comma,
     Equal,
@@ -38,32 +41,29 @@ pub enum Symbol {
 }
 
 impl TryFrom<char> for Symbol {
-    type Error = QueryError;
+    type Error = ();
 
-    fn try_from(value: char) -> Result<Self, Self::Error> {
-        let symbol = match &value {
-            ',' => Self::Comma,
-            '=' => Self::Equal,
-            '(' => Self::LParen,
-            ')' => Self::RParen,
-            '*' => Self::Star,
-            _ => return Err(QueryError::SymbloParsing),
-        };
-
-        Ok(symbol)
+    fn try_from(value: char) -> Result<Self, ()> {
+        match value {
+            ',' => Ok(Self::Comma),
+            '=' => Ok(Self::Equal),
+            '(' => Ok(Self::LParen),
+            ')' => Ok(Self::RParen),
+            '*' => Ok(Self::Star),
+            _ => Err(()),
+        }
     }
 }
 
 impl Display for Symbol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let out = match self {
-            Self::Comma => "comma symbol",
-            Self::Equal => "equal symbol",
-            Self::LParen => "lef paren symbol",
-            Self::RParen => "right paren symbol",
-            Self::Star => "star symbol",
-        };
-        write!(f, "{out}")
+        f.write_str(match self {
+            Self::Comma => ",",
+            Self::Equal => "=",
+            Self::LParen => "(",
+            Self::RParen => ")",
+            Self::Star => "*",
+        })
     }
 }
 
@@ -146,13 +146,14 @@ impl From<Symbol> for Token {
     }
 }
 
+/// Written for error messages: `expected FROM, found identifier `name``.
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Keyword(k) => write!(f, "{k}"),
-            Self::Ident(i) => write!(f, "{i}"),
-            Self::StringLit(s) => write!(f, "'{s}'"),
-            Self::Symbol(s) => write!(f, "{s}"),
+            Self::Keyword(k) => write!(f, "keyword {k}"),
+            Self::Ident(i) => write!(f, "identifier `{i}`"),
+            Self::StringLit(s) => write!(f, "string '{s}'"),
+            Self::Symbol(s) => write!(f, "`{s}`"),
         }
     }
 }
@@ -172,32 +173,28 @@ impl TryFrom<&str> for Keyword {
             "select" => Ok(Self::Select),
             "from" => Ok(Self::From),
             "where" => Ok(Self::Where),
+            "count" => Ok(Self::Count),
             _ => Err(()),
         }
     }
 }
 
-#[instrument(level = "info", ret, err)]
+#[instrument(level = "debug", ret)]
 pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
-    let malformed = |reason: &str| QueryError::Malformed {
-        query: query.to_owned(),
-        reason: reason.to_owned(),
-    };
-
     let mut tokens = vec![];
     let mut rest = query.trim_start();
     while let Some(c) = rest.chars().next() {
+        let pos = query.len() - rest.len();
         let (token, len) = match c {
             '\'' => {
                 let close = rest[1..]
                     .find('\'')
-                    .ok_or_else(|| malformed("unterminated string literal"))?;
+                    .ok_or(QueryError::UnterminatedString { pos })?;
                 (
                     Token::StringLit(rest[1..=close].to_owned().into()),
                     close + 2,
                 )
             }
-            x if SYMBOLS_LIST.contains(&x) => (Symbol::try_from(x)?.into(), 1),
             c if is_ident_start(c) => {
                 let len = rest.find(|c| !is_ident_char(c)).unwrap_or(rest.len());
                 let word = &rest[..len];
@@ -205,11 +202,15 @@ pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
                     .map_or_else(|()| Token::Ident(Ident::new(word)), Token::Keyword);
                 (token, len)
             }
-            other => return Err(QueryError::UknownToken(other.to_string())),
+            c => {
+                let symbol =
+                    Symbol::try_from(c).map_err(|()| QueryError::UnexpectedChar { ch: c, pos })?;
+                (symbol.into(), 1)
+            }
         };
         tokens.push(token);
         rest = rest[len..].trim_start();
     }
-    info!("tokens count: {}", tokens.len());
+    debug!(count = tokens.len(), "tokenized");
     Ok(tokens)
 }

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    error::QueryError,
-    helpers::{QueryResult, TableLeafCell},
+    error::{QueryError, QueryResult, StorageError},
+    helpers::TableLeafCell,
     sql::Ident,
 };
 
@@ -22,7 +22,10 @@ pub fn filter_what_col(
                 .record
                 .values
                 .get(t_idx)
-                .ok_or_else(|| QueryError::NoSuchColumn(col.clone()))?;
+                .ok_or(StorageError::RecordTooShort {
+                    column: t_idx,
+                    len: row.record.values.len(),
+                })?;
 
             let idx = idx_col + (idx_row * what.len());
             out[idx] = value.to_string();

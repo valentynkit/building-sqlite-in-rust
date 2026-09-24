@@ -1,8 +1,8 @@
 use tracing::instrument;
 
 use crate::{
-    error::QueryError,
-    helpers::{QueryResult, RecordType, SqliteSchema},
+    error::{QueryError, QueryResult, StorageError},
+    helpers::{RecordType, SqliteSchema},
     sql::Ident,
 };
 
@@ -17,7 +17,7 @@ impl<'a> TableSchemas<'a> {
     }
 }
 
-#[instrument(level = "info", skip(schemas), err)]
+#[instrument(level = "debug", skip(schemas))]
 pub fn resolve_table_schemas<'a>(
     schemas: &'a [SqliteSchema],
     tbl_name: &Ident,
@@ -42,7 +42,7 @@ pub fn resolve_table_schemas<'a>(
             } => {
                 if let Some(table_schema) = table_schema {
                     let tbl_name = table_schema.tbl_name().clone();
-                    return Err(QueryError::DuplicatedTable(tbl_name));
+                    return Err(StorageError::DuplicateTable(tbl_name).into());
                 }
                 table_schema = Some(record);
             }
