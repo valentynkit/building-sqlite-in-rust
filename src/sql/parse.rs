@@ -278,20 +278,6 @@ pub fn parse_first_page(file: &File) -> StorageResult<Vec<u8>> {
     Ok(page_buf)
 }
 
-#[instrument(level = "debug", skip(page_buf), err)]
-pub fn parse_sqlite_schemas(page_buf: &[u8]) -> StorageResult<Vec<SqliteSchema>> {
-    let page_header = page_header(page_buf, 0)?;
-    let mut schemas: Vec<SqliteSchema> = vec![];
-
-    for &ptr in page_header.cell_pointers() {
-        let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
-        schemas.push(parse(cell.record.values)?);
-    }
-    debug!(count = schemas.len(), "parsed sqlite schemas");
-
-    Ok(schemas)
-}
-
 #[cfg(test)]
 mod tests {
     use super::parse_query;

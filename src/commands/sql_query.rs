@@ -3,34 +3,25 @@ use std::fs::File;
 use tracing::{info, instrument};
 
 use crate::{
-    error::QueryError,
-    helpers::{QueryResult, RecordType, SqliteSchema, btree_walk},
+    error::QueryResult,
+    helpers::{RecordType, SqliteSchema},
     sql::{
-        ParsedTokens, Projection, filter_what_col, parse_query, plan, resolve_table_schemas,
-        tokenize,
+        ParsedTokens, Projection, btree_walk, filter_what_col, parse_query, plan,
+        resolve_table_schemas, tokenize,
     },
 };
 
-#[instrument(level = "info", skip(schemas, file), ret, err)]
+#[instrument(level = "info", skip(schemas, file), err)]
 pub fn run(
     file: &File,
     schemas: &[SqliteSchema],
     page_size: u16,
     query: &[String],
 ) -> QueryResult<String> {
-    let query = query.join(" ").trim_start().to_owned();
-
+    let query = query.join(" ");
     info!(%query, "executing sql");
-    let malformed = |reason: &str| QueryError::Malformed {
-        query: query.clone(),
-        reason: reason.to_owned(),
-    };
 
     let tokens = tokenize(&query)?;
-
-    if tokens.len() <= 2 {
-        return Err(malformed("expected query to have more than 4 words"));
-    }
 
     let ParsedTokens {
         projection,
@@ -40,12 +31,8 @@ pub fn run(
 
     let table_schemas = resolve_table_schemas(schemas, &table)?;
 
-    let RecordType::Table {
-        parsed_columns,
-        rowid_alias: _,
-    } = table_schemas.table.ty()
-    else {
-        return Err(QueryError::NoSuchTable(table));
+    let RecordType::Table { parsed_columns, .. } = table_schemas.table.ty() else {
+        unreachable!("resolve returns a table schema for `table`");
     };
 
     let walk_plan = plan(conditions, parsed_columns, &table_schemas)?;
