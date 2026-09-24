@@ -1,14 +1,11 @@
 use std::fs::File;
 
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use crate::{
     error::QueryError,
-    helpers::{QueryResult, RecordType, SqliteSchema, TableLeafCell, btree_walk, walk, walk_index},
-    sql::{
-        ParsedTokens, Plan, TableSchemas, filter_what_col, parse_query, plan,
-        resolve_table_schemas, tokenize,
-    },
+    helpers::{QueryResult, RecordType, SqliteSchema, btree_walk},
+    sql::{ParsedTokens, filter_what_col, parse_query, plan, resolve_table_schemas, tokenize},
 };
 
 #[instrument(level = "info", skip(schemas, file), ret, err)]
