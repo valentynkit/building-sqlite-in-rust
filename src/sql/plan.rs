@@ -4,22 +4,23 @@ use tracing::instrument;
 
 use crate::{
     error::QueryError,
-    helpers::{Column, QueryResult, RecordType, SqliteSchema},
-    sql::{Condition, Ident},
+    helpers::{Column, QueryResult, RecordType},
+    sql::{Condition, Ident, TableSchemas},
 };
 
 pub struct Plan {
-    pub indexed_conditions: Vec<(usize, Column)>,
-    pub scan_conditions: Vec<(usize, Column)>,
+    pub indexed: Vec<(usize, Column)>,
+    pub normal: Vec<(usize, Column)>,
 }
 
-#[instrument(level = "info", skip(index_schemas, parsed_columns, conditions), err)]
+#[instrument(level = "info", skip(parsed_columns, conditions, table_schemas), err)]
 pub fn plan(
     conditions: Vec<Condition>,
     parsed_columns: &HashMap<Ident, usize>,
-    index_schemas: &[&SqliteSchema],
+    table_schemas: &TableSchemas,
 ) -> QueryResult<Plan> {
-    let indexed: HashSet<usize> = index_schemas
+    let indexed: HashSet<usize> = table_schemas
+        .indexes
         .iter()
         .filter_map(|s| match s.ty() {
             RecordType::Index { col_name } => parsed_columns.get(col_name).copied(),
@@ -27,7 +28,7 @@ pub fn plan(
         })
         .collect();
 
-    let (indexed_conditions, scan_conditions) = conditions
+    let (indexed, normal) = conditions
         .into_iter()
         .map(|c| {
             let idx = *parsed_columns
@@ -39,8 +40,5 @@ pub fn plan(
         .into_iter()
         .partition(|(idx, _)| indexed.contains(idx));
 
-    Ok(Plan {
-        indexed_conditions,
-        scan_conditions,
-    })
+    Ok(Plan { indexed, normal })
 }
