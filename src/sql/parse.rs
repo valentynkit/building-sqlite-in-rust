@@ -68,7 +68,7 @@ impl QuerySection {
 #[derive(Debug)]
 pub struct ParsedTokens {
     pub what: Vec<Ident>,
-    pub from: Vec<Ident>,
+    pub table: Ident,
     pub conditions: Vec<Condition>,
 }
 
@@ -183,12 +183,27 @@ pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
         }
     }
 
+    if what.is_empty() {
+        return Err(QueryError::InternalTokensParser {
+            reason: "expected SELECT <expr> ".to_string(),
+        });
+    }
+    if from.len() != 1 {
+        return Err(QueryError::InternalTokensParser {
+            reason: "expected FROM <tbl_name> ".to_string(),
+        });
+    }
+
+    let table = from.into_iter().next().unwrap();
+
     let parsed_tokens = ParsedTokens {
         what,
-        from,
+        table,
         conditions,
     };
+
     debug!(?parsed_tokens, "parsed SQL query");
+
     Ok(parsed_tokens)
 }
 
