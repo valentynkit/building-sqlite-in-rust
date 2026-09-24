@@ -4,10 +4,10 @@ use tracing::{debug, info, instrument};
 
 use crate::{
     error::QueryError,
-    helpers::{QueryResult, RecordType, SqliteSchema, TableLeafCell, walk, walk_index},
+    helpers::{walk, walk_index, QueryResult, RecordType, SqliteSchema, TableLeafCell},
     sql::{
-        ParsedTokens, Plan, TableSchemas, filter_what_col, parse_query, plan,
-        resolve_table_schemas, tokenize,
+        filter_what_col, parse_query, plan, resolve_table_schemas, tokenize, ParsedTokens, Plan,
+        TableSchemas,
     },
 };
 
