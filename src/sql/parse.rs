@@ -66,8 +66,13 @@ impl QuerySection {
 }
 
 #[derive(Debug)]
+pub enum Projection {
+    Count,
+    Columns(Vec<Ident>),
+}
+#[derive(Debug)]
 pub struct ParsedTokens {
-    pub what: Vec<Ident>,
+    pub projection: Projection,
     pub table: Ident,
     pub conditions: Vec<Condition>,
 }
@@ -97,16 +102,16 @@ impl Condition {
 pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
     let mut query_section = QuerySection::default();
 
-    let mut what: Vec<Ident> = vec![];
+    let mut projection: Option<Projection> = None;
     let mut from: Vec<Ident> = vec![];
     let mut conditions: Vec<Condition> = vec![];
 
     let malformed = |token: Token, reason: &str| QueryError::Parser {
-        token: token,
+        token,
         reason: reason.to_owned(),
     };
     let mut tokens = tokens.into_iter();
-    for token in tokens.by_ref() {
+    while let Some(token) = tokens.next() {
         match query_section {
             QuerySection::Unstarted => {
                 let Token::Keyword(keyword) = token else {
@@ -116,11 +121,48 @@ pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
                 query_section = query_section.try_progress_to_next_section(keyword)?;
             }
             QuerySection::Select => match token {
-                Token::Keyword(keyword) => {
-                    query_section = query_section.try_progress_to_next_section(keyword)?;
-                }
+                Token::Keyword(keyword) => match keyword {
+                    Keyword::Count => {
+                        let (Some(lparen), Some(star), Some(rparen)) =
+                            (tokens.next(), tokens.next(), tokens.next())
+                        else {
+                            return Err(QueryError::InternalTokensParser {
+                                reason: "WHERE expects triple tuple `<col> <op> <value>`"
+                                    .to_string(),
+                            });
+                        };
+
+                        let (
+                            Token::Symbol(Symbol::LParen),
+                            Token::Symbol(Symbol::Star),
+                            Token::Symbol(Symbol::RParen),
+                        ) = (lparen, star, rparen)
+                        else {
+                            return Err(QueryError::InternalTokensParser {
+                                reason: "WHERE expects triple tuple `<col> = <value>`".to_string(),
+                            });
+                        };
+
+                        match projection.get_or_insert_with(|| Projection::Count) {
+                            Projection::Columns(_) => {
+                                return Err(QueryError::InternalTokensParser {
+                                    reason: "can't mix COUNT(*) with columns".to_string(),
+                                });
+                            }
+                            Projection::Count => {}
+                        }
+                    }
+                    _ => query_section = query_section.try_progress_to_next_section(keyword)?,
+                },
                 Token::Ident(ident) => {
-                    what.push(ident);
+                    match projection.get_or_insert_with(|| Projection::Columns(vec![])) {
+                        Projection::Columns(columns) => columns.push(ident),
+                        Projection::Count => {
+                            return Err(QueryError::InternalTokensParser {
+                                reason: "can't mix COUNT(*) with columns".to_string(),
+                            });
+                        }
+                    }
                 }
                 Token::Symbol(Symbol::Comma) => {}
                 _ => {
@@ -183,11 +225,12 @@ pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
         }
     }
 
-    if what.is_empty() {
+    let Some(projection) = projection else {
         return Err(QueryError::InternalTokensParser {
             reason: "expected SELECT <expr> ".to_string(),
         });
-    }
+    };
+
     if from.len() != 1 {
         return Err(QueryError::InternalTokensParser {
             reason: "expected FROM <tbl_name> ".to_string(),
@@ -197,7 +240,7 @@ pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
     let table = from.into_iter().next().unwrap();
 
     let parsed_tokens = ParsedTokens {
-        what,
+        projection,
         table,
         conditions,
     };

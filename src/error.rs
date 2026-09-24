@@ -55,6 +55,8 @@ pub enum QueryError {
     NoSuchColumn(Ident),
     #[error("{reason}; malformed query: {query}")]
     Malformed { query: String, reason: String },
+    #[error("couldn't parse symbol")]
+    SymbloParsing,
     #[error("couldn't parse token: {token}, reason: {reason}")]
     Parser { token: Token, reason: String },
     #[error("couldn't parse reason: {reason}")]
