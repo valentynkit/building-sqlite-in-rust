@@ -13,7 +13,7 @@ pub struct SqliteSchema {
 }
 
 impl SqliteSchema {
-    pub fn new(ty: RecordType, tbl_name: Ident, rootpage: i64) -> Self {
+    pub const fn new(ty: RecordType, tbl_name: Ident, rootpage: i64) -> Self {
         Self {
             ty,
             tbl_name,
@@ -21,11 +21,11 @@ impl SqliteSchema {
         }
     }
 
-    pub(crate) fn ty(&self) -> &RecordType {
+    pub(crate) const fn ty(&self) -> &RecordType {
         &self.ty
     }
 
-    pub(crate) fn tbl_name(&self) -> &Ident {
+    pub(crate) const fn tbl_name(&self) -> &Ident {
         &self.tbl_name
     }
 

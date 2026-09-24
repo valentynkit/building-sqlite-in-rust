@@ -6,20 +6,6 @@ use crate::{
 pub type Result<T, E = FormatError> = core::result::Result<T, E>;
 pub type QueryResult<T, E = QueryError> = core::result::Result<T, E>;
 
-#[derive(Copy, Clone)]
-pub struct DbHeader {
-    page_size: u16,
-}
-
-impl DbHeader {
-    pub const fn new(page_size: u16) -> Self {
-        Self { page_size }
-    }
-    pub const fn page_size(self) -> u16 {
-        self.page_size
-    }
-}
-
 pub fn varint(buf: &[u8]) -> Result<(i64, usize)> {
     const MORE_FOLLOWS: u8 = 0b1000_0000; // top bit
     const PAYLOAD: u8 = 0b0111_1111; // low 7 bits

@@ -1,3 +1,5 @@
+use tracing::instrument;
+
 use crate::{
     error::QueryError,
     helpers::{QueryResult, RecordType, SqliteSchema},
@@ -10,11 +12,12 @@ pub struct TableSchemas<'a> {
 }
 
 impl<'a> TableSchemas<'a> {
-    pub fn new(table: &'a SqliteSchema, indexes: Vec<&'a SqliteSchema>) -> Self {
+    pub const fn new(table: &'a SqliteSchema, indexes: Vec<&'a SqliteSchema>) -> Self {
         Self { table, indexes }
     }
 }
 
+#[instrument(level = "info", skip(schemas), err)]
 pub fn resolve_table_schemas<'a>(
     schemas: &'a [SqliteSchema],
     tbl_name: &Ident,

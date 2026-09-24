@@ -1,29 +1,24 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, fs::File};
 
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::{
     error::{FormatError, QueryError},
     helpers::{
-        Column, QueryResult, RecordType, Result, SqliteSchema, int, page_header, parse_leaf_cell,
-        text,
+        Column, QueryResult, RecordType, Result, SqliteSchema, int, page_header, page_size,
+        parse_leaf_cell, read_page, text,
     },
     sql::{Ident, Keyword, Symbol, Token},
 };
 
 /// Used for parsing, during iteration to identify what is the current query section.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub enum QuerySection {
+    #[default]
     Unstarted,
     Select,
     From,
     Where,
-}
-
-impl Default for QuerySection {
-    fn default() -> Self {
-        Self::Unstarted
-    }
 }
 
 impl Display for QuerySection {
@@ -63,7 +58,7 @@ impl QuerySection {
         if token != expected {
             return Err(QueryError::Parser {
                 token: Token::Keyword(token),
-                reason: format!("Where section shouldn't contain another keyword"),
+                reason: "Where section shouldn't contain another keyword".to_string(),
             });
         }
         self.next()
@@ -97,6 +92,8 @@ impl Condition {
 // TODO: probably cleaner would be not passing query at all, but instead propogate some error, and
 // let the caller parse this error, and throw a new one by enriching it with query, like the
 // Malformed type, whire this being agnorant of the actual query passed to it.
+
+#[instrument(level = "info", skip(query, tokens), ret, err)]
 pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
     let mut query_section = QuerySection::default();
 
@@ -125,6 +122,7 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
                 Token::Ident(ident) => {
                     what.push(ident);
                 }
+                Token::Symbol(Symbol::Comma) => {}
                 _ => {
                     return Err(malformed(
                         "expected having identifiers or FROM keyword in SELECT section",
@@ -297,15 +295,26 @@ pub fn parse(values: Vec<Column>) -> Result<SqliteSchema> {
     Ok(schema)
 }
 
+#[instrument(level = "debug", skip(file), err)]
+pub fn parse_first_page(file: &File) -> anyhow::Result<Vec<u8>> {
+    let page_size = page_size(file)?;
+
+    let mut page_buf = vec![0u8; page_size as usize];
+    read_page(file, &mut page_buf, page_size, 0)?;
+    Ok(page_buf)
+}
+
+#[instrument(skip(page_buf), err)]
 pub fn parse_sqlite_schemas(page_buf: &[u8]) -> anyhow::Result<Vec<SqliteSchema>> {
     let page_header = page_header(page_buf, 0)?;
     let mut schemas: Vec<SqliteSchema> = vec![];
 
     for &ptr in page_header.cell_pointers() {
-        debug!(offset = ptr, "start parsing cell");
         let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
+        debug!(?cell);
         schemas.push(parse(cell.record.values)?);
     }
+    debug!("successfully parsed sqlite schemas: {}", schemas.len());
 
     Ok(schemas)
 }

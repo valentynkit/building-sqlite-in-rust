@@ -13,7 +13,7 @@ pub fn filter_what_col(
 ) -> QueryResult<String> {
     let mut out: Vec<String> = vec![String::new(); cells.len() * what.len()];
     for (idx_col, col) in what.iter().enumerate() {
-        let Some(&t_idx) = parsed_columns.get(&col) else {
+        let Some(&t_idx) = parsed_columns.get(col) else {
             return Err(QueryError::NoSuchColumn(col.clone()));
         };
 
@@ -22,7 +22,7 @@ pub fn filter_what_col(
                 .record
                 .values
                 .get(t_idx)
-                .ok_or(QueryError::NoSuchColumn(col.clone()))?;
+                .ok_or_else(|| QueryError::NoSuchColumn(col.clone()))?;
 
             let idx = idx_col + (idx_row * what.len());
             out[idx] = value.to_string();

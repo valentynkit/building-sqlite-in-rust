@@ -1,9 +1,9 @@
-use crate::{constants::DB_HEADER_SIZE, error::FormatError, helpers::DbHeader};
+use crate::{constants::DB_HEADER_SIZE, error::FormatError};
 
 use super::Result;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
-use tracing::{debug, error};
+use tracing::{debug, error, instrument};
 
 #[derive(Debug)]
 pub struct PageHeader {
@@ -91,6 +91,7 @@ impl PageHeader {
 }
 
 /// Page, HEADER
+#[instrument(level = "debug", skip(file, buf, page_size), err)]
 pub fn read_page(file: &File, buf: &mut [u8], page_size: u16, page_num: usize) -> Result<()> {
     let offset = page_size as usize * page_num;
     debug!(?offset, ?page_size, ?page_num, "loading the page");
@@ -129,11 +130,11 @@ pub fn page_header(page: &[u8], page_num: usize) -> Result<PageHeader> {
     Ok(page_header)
 }
 
-pub fn db_header(file: &File) -> Result<DbHeader> {
+pub fn page_size(file: &File) -> Result<u16> {
     let mut db_header: [u8; 100] = [0; 100];
     file.read_exact_at(&mut db_header, 0)?;
 
     let page_size = u16::from_be_bytes([db_header[16], db_header[17]]);
     debug!(?page_size, "parsed db_header");
-    Ok(DbHeader::new(page_size))
+    Ok(page_size)
 }

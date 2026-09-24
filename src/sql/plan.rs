@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
+use tracing::instrument;
+
 use crate::{
     error::QueryError,
     helpers::{Column, QueryResult, RecordType, SqliteSchema},
-    sql::{Condition, Ident, StringLit},
+    sql::{Condition, Ident},
 };
 
 pub struct Plan {
@@ -11,6 +13,7 @@ pub struct Plan {
     pub scan_conditions: Vec<(usize, Column)>,
 }
 
+#[instrument(level = "info", skip(index_schemas, parsed_columns, conditions), err)]
 pub fn plan(
     conditions: Vec<Condition>,
     parsed_columns: &HashMap<Ident, usize>,

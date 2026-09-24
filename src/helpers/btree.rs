@@ -1,7 +1,7 @@
 use std::fs::File;
 
 use super::Result;
-use tracing::{debug, error};
+use tracing::{error, instrument};
 
 use crate::{
     error::{FormatError, QueryError},
@@ -22,6 +22,7 @@ pub struct TableLeafCell {
     pub record: Record,
 }
 
+#[instrument(level = "debug", skip(buf), ret, err)]
 pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
     let mut off: usize = 0;
     // parsing cell
@@ -33,22 +34,12 @@ pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
 
     let record_end_off = off + usize::try_from(payload_size)?;
 
-    debug!(
-        ?payload_size,
-        record_size = payload_size + 2,
-        ?rowid,
-        ?off,
-        ?record_end_off,
-        "parsing cell hdr"
-    );
-
     let (hdr_size, n) = varint(&buf[off..])?;
     // offset where record hdr ends
     let record_hdr_end_off = off + usize::try_from(hdr_size)?;
     off += n;
     let mut serial_types: Vec<SerialType> = vec![];
 
-    debug!(?off, ?record_hdr_end_off, "start parsing columns types");
     // parsing record header
     while off < record_hdr_end_off {
         let (s_type, n) = varint(&buf[off..])?;
@@ -56,11 +47,8 @@ pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
         serial_types.push(serial_type);
         off += n;
     }
-    debug!(?serial_types);
 
     let rec_hdr = RecordHdr::new(serial_types);
-
-    debug!(?rec_hdr, "start parsing column values");
 
     let mut values: Vec<Column> = Vec::with_capacity(rec_hdr.serial_types().len());
     for &s_type in rec_hdr.serial_types() {
@@ -72,8 +60,6 @@ pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
         values.push(col);
         off += n;
     }
-
-    debug!(?values);
 
     let record = Record { values };
     let cell_parsed = TableLeafCell { rowid, record };
