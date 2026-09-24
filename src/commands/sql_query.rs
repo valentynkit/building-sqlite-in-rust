@@ -4,10 +4,10 @@ use tracing::{debug, info, instrument};
 
 use crate::{
     error::QueryError,
-    helpers::{walk, walk_index, QueryResult, RecordType, SqliteSchema, TableLeafCell},
+    helpers::{QueryResult, RecordType, SqliteSchema, TableLeafCell, walk, walk_index},
     sql::{
-        filter_what_col, parse_query, plan, resolve_table_schemas, tokenize, ParsedTokens, Plan,
-        TableSchemas,
+        ParsedTokens, Plan, TableSchemas, filter_what_col, parse_query, plan,
+        resolve_table_schemas, tokenize,
     },
 };
 
@@ -36,7 +36,7 @@ pub fn run(
         what,
         from,
         conditions,
-    } = parse_query(&query, tokens)?;
+    } = parse_query(tokens)?;
 
     if what.is_empty() {
         return Err(malformed("expected SELECT <expr> "));
