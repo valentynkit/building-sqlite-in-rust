@@ -31,27 +31,18 @@ pub fn run(
 
     let ParsedTokens {
         what,
-        from,
+        table,
         conditions,
     } = parse_query(tokens)?;
 
-    if what.is_empty() {
-        return Err(malformed("expected SELECT <expr> "));
-    }
-    if from.len() != 1 {
-        return Err(malformed("expected FROM <tbl_name> "));
-    }
-
-    let tbl_name = from[0].clone();
-
-    let table_schemas = resolve_table_schemas(schemas, &tbl_name)?;
+    let table_schemas = resolve_table_schemas(schemas, &table)?;
 
     let RecordType::Table {
         parsed_columns,
         rowid_alias: _,
     } = table_schemas.table.ty()
     else {
-        return Err(QueryError::NoSuchTable(tbl_name));
+        return Err(QueryError::NoSuchTable(table));
     };
 
     let walk_plan = plan(conditions, parsed_columns, &table_schemas)?;
