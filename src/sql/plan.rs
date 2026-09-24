@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 
 use crate::{
-    error::QueryError,
-    helpers::{Column, QueryResult, RecordType},
+    error::{QueryError, QueryResult},
+    helpers::{Column, RecordType},
     sql::{Condition, Ident, TableSchemas},
 };
 
@@ -13,7 +13,7 @@ pub struct Plan {
     pub normal: Vec<(usize, Column)>,
 }
 
-#[instrument(level = "info", skip(parsed_columns, conditions, table_schemas), err)]
+#[instrument(level = "debug", skip(parsed_columns, conditions, table_schemas))]
 pub fn plan(
     conditions: Vec<Condition>,
     parsed_columns: &HashMap<Ident, usize>,

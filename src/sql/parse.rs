@@ -3,10 +3,10 @@ use std::{collections::HashMap, fmt::Display, fs::File};
 use tracing::{debug, instrument};
 
 use crate::{
-    error::{FormatError, QueryError},
+    error::{QueryError, QueryResult, StorageError, StorageResult},
     helpers::{
-        Column, QueryResult, RecordType, Result, SqliteSchema, int, page_header, page_size,
-        parse_leaf_cell, read_page, text,
+        Column, RecordType, SqliteSchema, int, page_header, page_size, parse_leaf_cell, read_page,
+        text,
     },
     sql::{Ident, Keyword, Symbol, Token},
 };
@@ -34,34 +34,42 @@ impl Display for QuerySection {
 }
 
 impl QuerySection {
-    // State machine, moving to next query section
-    const fn next(self) -> QueryResult<Self> {
-        let res = match self {
-            Self::Unstarted => Self::Select,
-            Self::Select => Self::From,
-            Self::From => Self::Where,
-            Self::Where => return Err(QueryError::QuerySection(Self::Where)),
-        };
-        Ok(res)
-    }
-
-    fn try_progress_to_next_section(self, token: Keyword) -> QueryResult<Self> {
-        let expected: Keyword = match self {
-            Self::Unstarted => Keyword::Select,
-            Self::Select => Keyword::From,
-            Self::From => Keyword::Where,
+    /// Moves to the next clause if `keyword` is the one that opens it.
+    fn advance(self, keyword: Keyword) -> QueryResult<Self> {
+        let (expected, next) = match self {
+            Self::Unstarted => (Keyword::Select, Self::Select),
+            Self::Select => (Keyword::From, Self::From),
+            Self::From => (Keyword::Where, Self::Where),
             Self::Where => {
-                return Err(QueryError::QuerySection(Self::Where));
+                return Err(unexpected("end of query", Token::Keyword(keyword)));
             }
         };
-
-        if token != expected {
-            return Err(QueryError::Parser {
-                token: Token::Keyword(token),
-                reason: "Where section shouldn't contain another keyword".to_string(),
-            });
+        if keyword != expected {
+            return Err(unexpected(expected.as_str(), Token::Keyword(keyword)));
         }
-        self.next()
+        Ok(next)
+    }
+}
+
+const fn unexpected(expected: &'static str, found: Token) -> QueryError {
+    QueryError::UnexpectedToken { expected, found }
+}
+
+fn next_token(
+    tokens: &mut impl Iterator<Item = Token>,
+    expected: &'static str,
+) -> QueryResult<Token> {
+    tokens.next().ok_or(QueryError::UnexpectedEnd { expected })
+}
+
+fn expect_symbol(
+    tokens: &mut impl Iterator<Item = Token>,
+    symbol: Symbol,
+    expected: &'static str,
+) -> QueryResult<()> {
+    match next_token(tokens, expected)? {
+        Token::Symbol(s) if s == symbol => Ok(()),
+        found => Err(unexpected(expected, found)),
     }
 }
 
@@ -94,292 +102,233 @@ impl Condition {
     }
 }
 
-// TODO: probably cleaner would be not passing query at all, but instead propogate some error, and
-// let the caller parse this error, and throw a new one by enriching it with query, like the
-// Malformed type, whire this being agnorant of the actual query passed to it.
-
-#[instrument(level = "info", skip(tokens), ret, err)]
+#[instrument(level = "debug", skip(tokens), ret)]
 pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
-    let mut query_section = QuerySection::default();
+    const PROJECTION: &str = "a column name or COUNT(*)";
 
+    let mut query_section = QuerySection::default();
     let mut projection: Option<Projection> = None;
-    let mut from: Vec<Ident> = vec![];
+    // True at the start of the SELECT list and after each comma.
+    let mut needs_column = true;
+    let mut table: Option<Ident> = None;
     let mut conditions: Vec<Condition> = vec![];
 
-    let malformed = |token: Token, reason: &str| QueryError::Parser {
-        token,
-        reason: reason.to_owned(),
-    };
     let mut tokens = tokens.into_iter();
     while let Some(token) = tokens.next() {
         match query_section {
             QuerySection::Unstarted => {
                 let Token::Keyword(keyword) = token else {
-                    return Err(malformed(token, "expected to start with keyword"));
+                    return Err(unexpected("SELECT", token));
                 };
-
-                query_section = query_section.try_progress_to_next_section(keyword)?;
+                query_section = query_section.advance(keyword)?;
             }
             QuerySection::Select => match token {
-                Token::Keyword(keyword) => match keyword {
-                    Keyword::Count => {
-                        let (Some(lparen), Some(star), Some(rparen)) =
-                            (tokens.next(), tokens.next(), tokens.next())
-                        else {
-                            return Err(QueryError::InternalTokensParser {
-                                reason: "WHERE expects triple tuple `<col> <op> <value>`"
-                                    .to_string(),
-                            });
-                        };
-
-                        let (
-                            Token::Symbol(Symbol::LParen),
-                            Token::Symbol(Symbol::Star),
-                            Token::Symbol(Symbol::RParen),
-                        ) = (lparen, star, rparen)
-                        else {
-                            return Err(QueryError::InternalTokensParser {
-                                reason: "WHERE expects triple tuple `<col> = <value>`".to_string(),
-                            });
-                        };
-
-                        match projection.get_or_insert_with(|| Projection::Count) {
-                            Projection::Columns(_) => {
-                                return Err(QueryError::InternalTokensParser {
-                                    reason: "can't mix COUNT(*) with columns".to_string(),
-                                });
-                            }
-                            Projection::Count => {}
-                        }
-                    }
-                    _ => query_section = query_section.try_progress_to_next_section(keyword)?,
-                },
-                Token::Ident(ident) => {
+                Token::Keyword(Keyword::Count) if projection.is_none() => {
+                    expect_symbol(&mut tokens, Symbol::LParen, "`(` after COUNT")?;
+                    expect_symbol(&mut tokens, Symbol::Star, "`*` in COUNT(*)")?;
+                    expect_symbol(&mut tokens, Symbol::RParen, "`)` after COUNT(*")?;
+                    projection = Some(Projection::Count);
+                    needs_column = false;
+                }
+                Token::Ident(ident) if needs_column => {
+                    needs_column = false;
                     match projection.get_or_insert_with(|| Projection::Columns(vec![])) {
                         Projection::Columns(columns) => columns.push(ident),
-                        Projection::Count => {
-                            return Err(QueryError::InternalTokensParser {
-                                reason: "can't mix COUNT(*) with columns".to_string(),
-                            });
-                        }
+                        Projection::Count => unreachable!("COUNT(*) clears needs_column"),
                     }
                 }
-                Token::Symbol(Symbol::Comma) => {}
-                _ => {
-                    return Err(malformed(
-                        token,
-                        "expected having identifiers or FROM keyword in SELECT section",
-                    ));
+                Token::Symbol(Symbol::Comma)
+                    if !needs_column && matches!(projection, Some(Projection::Columns(_))) =>
+                {
+                    needs_column = true;
                 }
+                Token::Keyword(keyword) if !needs_column => {
+                    query_section = query_section.advance(keyword)?;
+                }
+                found if projection.is_none() => return Err(unexpected(PROJECTION, found)),
+                found if needs_column => return Err(unexpected("a column name", found)),
+                found if matches!(projection, Some(Projection::Count)) => {
+                    return Err(unexpected("FROM", found));
+                }
+                found => return Err(unexpected("`,` or FROM", found)),
             },
             QuerySection::From => match token {
-                Token::Keyword(keyword) => {
-                    query_section = query_section.try_progress_to_next_section(keyword)?;
+                Token::Ident(ident) if table.is_none() => table = Some(ident),
+                Token::Keyword(keyword) if table.is_some() => {
+                    query_section = query_section.advance(keyword)?;
                     break;
                 }
-                Token::Ident(ident) => {
-                    from.push(ident);
-                }
-                _ => {
-                    return Err(malformed(
-                        token,
-                        "expected having identifiers or WHERE keyword in FROM section",
-                    ));
-                }
+                found if table.is_none() => return Err(unexpected("a table name", found)),
+                found => return Err(unexpected("WHERE or end of query", found)),
             },
-            QuerySection::Where => {
-                return Err(malformed(
-                    token,
-                    "where section shouldn't be reached in per token parsing, and should be handled seperately",
-                ));
-            }
+            QuerySection::Where => unreachable!("WHERE is parsed after this loop"),
         }
     }
 
     if query_section == QuerySection::Where {
         loop {
-            let (Some(col), Some(sym), Some(val)) = (tokens.next(), tokens.next(), tokens.next())
-            else {
-                return Err(QueryError::InternalTokensParser {
-                    reason: "WHERE expects triple tuple `<col> <op> <value>`".to_string(),
-                });
+            let column_name = match next_token(&mut tokens, "a column name")? {
+                Token::Ident(ident) => ident,
+                found => return Err(unexpected("a column name", found)),
             };
-            let (
-                Token::Ident(column_name),
-                Token::Symbol(Symbol::Equal),
-                Token::StringLit(exp_value),
-            ) = (col, sym, val)
-            else {
-                return Err(QueryError::InternalTokensParser {
-                    reason: "WHERE expects triple tuple `<col> = <value>`".to_string(),
-                });
+            expect_symbol(&mut tokens, Symbol::Equal, "`=`")?;
+            let exp_value = match next_token(&mut tokens, "a string literal")? {
+                Token::StringLit(lit) => Column::Text(lit.into_inner()),
+                found => return Err(unexpected("a string literal", found)),
             };
-
-            let condition = Condition::new(
-                column_name,
-                Symbol::Equal,
-                Column::Text(exp_value.into_inner()),
-            );
-            debug!(?condition, "parsed query chunk condition");
+            let condition = Condition::new(column_name, Symbol::Equal, exp_value);
+            debug!(?condition, "parsed condition");
             conditions.push(condition);
+            if tokens.len() == 0 {
+                break;
+            }
         }
     }
 
-    let Some(projection) = projection else {
-        return Err(QueryError::InternalTokensParser {
-            reason: "expected SELECT <expr> ".to_string(),
-        });
-    };
+    let projection = projection.ok_or(QueryError::UnexpectedEnd {
+        expected: PROJECTION,
+    })?;
+    let table = table.ok_or(QueryError::UnexpectedEnd {
+        expected: "FROM <table>",
+    })?;
 
-    if from.len() != 1 {
-        return Err(QueryError::InternalTokensParser {
-            reason: "expected FROM <tbl_name> ".to_string(),
-        });
-    }
-
-    let table = from.into_iter().next().unwrap();
-
-    let parsed_tokens = ParsedTokens {
+    Ok(ParsedTokens {
         projection,
         table,
         conditions,
-    };
-
-    debug!(?parsed_tokens, "parsed SQL query");
-
-    Ok(parsed_tokens)
-}
-
-fn parse_index_sql(
-    query: &str,
-    uknown_sql: &impl Fn(&str, &str) -> FormatError,
-) -> Result<RecordType> {
-    let open = query.find('(').ok_or_else(|| uknown_sql("(", ""))?;
-    let close = query.find(')').ok_or_else(|| uknown_sql(")", ""))?;
-
-    if open >= close {
-        return Err(uknown_sql(
-            "(...)",
-            &format!("`(` at {open} after `)` at {close}"),
-        ));
-    }
-
-    let inside_parentheses = &query[open + 1..close];
-    Ok(RecordType::Index {
-        col_name: Ident::new(inside_parentheses),
     })
 }
 
-fn parse_table_sql(
-    query: &str,
-    uknown_sql: &impl Fn(&str, &str) -> FormatError,
-) -> Result<RecordType> {
-    let open = query.find('(').ok_or_else(|| uknown_sql("(", ""))?;
-    let close = query.find(')').ok_or_else(|| uknown_sql(")", ""))?;
-
-    if open >= close {
-        return Err(uknown_sql(
-            "(...)",
-            &format!("`(` at {open} after `)` at {close}"),
-        ));
+/// Text between the first `(` and the last `)` of a CREATE statement.
+fn between_parens(sql: &str) -> StorageResult<&str> {
+    let unsupported = |reason| StorageError::UnsupportedSchemaSql {
+        reason,
+        sql: sql.to_owned(),
+    };
+    let open = sql.find('(').ok_or_else(|| unsupported("missing `(`"))?;
+    let close = sql.rfind(')').ok_or_else(|| unsupported("missing `)`"))?;
+    if close < open {
+        return Err(unsupported("`)` before `(`"));
     }
+    Ok(&sql[open + 1..close])
+}
 
-    let inside_parentheses = &query[open + 1..close];
+fn parse_index_sql(sql: &str) -> StorageResult<RecordType> {
+    Ok(RecordType::Index {
+        col_name: Ident::new(between_parens(sql)?.trim()),
+    })
+}
 
-    debug!(?inside_parentheses);
+fn parse_table_sql(sql: &str) -> StorageResult<RecordType> {
     let mut parsed_columns: HashMap<Ident, usize> = HashMap::new();
     let mut rowid_alias = None;
-    let columns: Vec<&str> = inside_parentheses.split(',').map(str::trim).collect();
 
-    debug!(?columns);
-    for (idx, sub_str) in columns.iter().enumerate() {
-        let item = sub_str
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| FormatError::UknownSql {
-                expected: "column name".to_owned(),
-                got: "None".to_owned(),
-            })?;
-        parsed_columns.insert(Ident::new(item), idx);
-        if sub_str.contains("integer primary key") {
+    for (idx, definition) in between_parens(sql)?.split(',').map(str::trim).enumerate() {
+        let name = definition.split_whitespace().next().ok_or_else(|| {
+            StorageError::UnsupportedSchemaSql {
+                reason: "empty column definition",
+                sql: sql.to_owned(),
+            }
+        })?;
+        parsed_columns.insert(Ident::new(name), idx);
+        if definition.contains("integer primary key") {
             rowid_alias = Some(idx);
         }
     }
 
     debug!(?parsed_columns, ?rowid_alias);
-    let rec = RecordType::Table {
+    Ok(RecordType::Table {
         parsed_columns,
         rowid_alias,
-    };
-
-    Ok(rec)
+    })
 }
 
-pub fn parse(values: Vec<Column>) -> Result<SqliteSchema> {
-    let [ty, _, tbl_name, rootpage, sql_query]: [Column; 5] =
-        values
-            .try_into()
-            .map_err(|v: Vec<Column>| FormatError::Schema {
-                exp_len: 5,
-                actual_len: v.len(),
-            })?;
+pub fn parse(values: Vec<Column>) -> StorageResult<SqliteSchema> {
+    let [ty, _, tbl_name, rootpage, sql]: [Column; 5] = values
+        .try_into()
+        .map_err(|v: Vec<Column>| StorageError::SchemaRowLen(v.len()))?;
 
-    let sql_query = text(4, sql_query)?;
+    let ty = text(0, ty)?;
     let tbl_name = Ident::new(text(2, tbl_name)?);
+    let sql = text(4, sql)?.to_ascii_lowercase();
 
-    let query = sql_query.to_ascii_lowercase();
-
-    let uknown_sql = |expected: &str, got: &str| FormatError::UknownSql {
-        expected: expected.to_owned(),
-        got: got.to_owned(),
-    };
-
-    let query_start = format!("create {ty}");
-    if !query.starts_with(query_start.as_str()) {
-        return Err(FormatError::UknownSql {
-            got: query,
-            expected: query_start,
+    if !sql.starts_with(&format!("create {ty}")) {
+        return Err(StorageError::UnsupportedSchemaSql {
+            reason: "does not start with CREATE <type>",
+            sql,
         });
     }
-    debug!(?query, ?tbl_name, "parsed sql");
 
-    let ty = match text(0, ty)?.as_str() {
-        "table" => parse_table_sql(&query, &uknown_sql),
-        "index" => parse_index_sql(&query, &uknown_sql),
-        str => Err(FormatError::UknownRecordType(str.to_owned())),
-    }?;
+    let ty = match ty.as_str() {
+        "table" => parse_table_sql(&sql)?,
+        "index" => parse_index_sql(&sql)?,
+        _ => return Err(StorageError::UnknownObjectType(ty)),
+    };
 
     let schema = SqliteSchema::new(ty, tbl_name, int(3, rootpage)?);
-    /*
-                name: text(1, name)?,
-                sql_query,
-    */
-
     debug!(?schema, "parsed");
-
     Ok(schema)
 }
 
-#[instrument(level = "debug", skip(file), err)]
-pub fn parse_first_page(file: &File) -> anyhow::Result<Vec<u8>> {
+#[instrument(level = "debug", skip(file))]
+pub fn parse_first_page(file: &File) -> StorageResult<Vec<u8>> {
     let page_size = page_size(file)?;
-
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(file, &mut page_buf, page_size, 0)?;
     Ok(page_buf)
 }
 
-#[instrument(skip(page_buf), err)]
-pub fn parse_sqlite_schemas(page_buf: &[u8]) -> anyhow::Result<Vec<SqliteSchema>> {
+#[instrument(level = "debug", skip(page_buf), err)]
+pub fn parse_sqlite_schemas(page_buf: &[u8]) -> StorageResult<Vec<SqliteSchema>> {
     let page_header = page_header(page_buf, 0)?;
     let mut schemas: Vec<SqliteSchema> = vec![];
 
     for &ptr in page_header.cell_pointers() {
         let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
-        debug!(?cell);
         schemas.push(parse(cell.record.values)?);
     }
-    debug!("successfully parsed sqlite schemas: {}", schemas.len());
+    debug!(count = schemas.len(), "parsed sqlite schemas");
 
     Ok(schemas)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_query;
+    use crate::{
+        error::QueryError,
+        sql::{Keyword, Token, tokenize},
+    };
+
+    fn parse(sql: &str) -> Result<super::ParsedTokens, QueryError> {
+        parse_query(tokenize(sql)?)
+    }
+
+    #[test]
+    fn errors_name_what_was_expected() {
+        assert!(matches!(
+            parse("select from t"),
+            Err(QueryError::UnexpectedToken {
+                found: Token::Keyword(Keyword::From),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse("select a, from t"),
+            Err(QueryError::UnexpectedToken {
+                expected: "a column name",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse("select a from"),
+            Err(QueryError::UnexpectedEnd { .. })
+        ));
+        assert!(matches!(
+            parse("select a from t where c = 'x"),
+            Err(QueryError::UnterminatedString { pos: 26 })
+        ));
+        assert!(parse("select a, b from t where c = 'x'").is_ok());
+        assert!(parse("select count(*) from t").is_ok());
+    }
 }

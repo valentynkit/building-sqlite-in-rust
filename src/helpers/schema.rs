@@ -1,5 +1,8 @@
-use super::Result;
-use crate::{helpers::RecordType, sql::Ident};
+use crate::{
+    error::StorageResult,
+    helpers::{RecordType, to_usize},
+    sql::Ident,
+};
 // sqlite_schema, CREATE parsing
 #[derive(Debug)]
 pub struct SqliteSchema {
@@ -29,8 +32,8 @@ impl SqliteSchema {
         &self.tbl_name
     }
 
-    pub(crate) fn rootpage_index(&self) -> Result<usize> {
-        Ok(usize::try_from(self.rootpage - 1)?)
+    pub(crate) fn rootpage_index(&self) -> StorageResult<usize> {
+        to_usize(self.rootpage - 1, "root page number")
     }
 
     /*

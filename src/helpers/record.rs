@@ -1,9 +1,12 @@
 // VARINT, Serial Types, Column
 
-use super::Result;
 use std::{collections::HashMap, fmt::Display};
 
-use crate::{error::FormatError, helpers::int_be, sql::Ident};
+use crate::{
+    error::{StorageError, StorageResult},
+    helpers::int_be,
+    sql::Ident,
+};
 
 /// Record-format serial type. Spec: `<https://www.sqlite.org/fileformat.html#record_format>`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +45,7 @@ impl SerialType {
 }
 
 impl TryFrom<u64> for SerialType {
-    type Error = FormatError;
+    type Error = StorageError;
 
     fn try_from(code: u64) -> Result<Self, Self::Error> {
         Ok(match code {
@@ -56,7 +59,7 @@ impl TryFrom<u64> for SerialType {
             7 => Self::F64,
             8 => Self::Zero,
             9 => Self::One,
-            10 | 11 => return Err(FormatError::SerialType(code)),
+            10 | 11 => return Err(StorageError::ReservedSerialType(code)),
             n if n % 2 == 0 => Self::Blob(((n - 12) / 2) as usize),
             n => Self::Text(((n - 13) / 2) as usize),
         })
@@ -64,11 +67,10 @@ impl TryFrom<u64> for SerialType {
 }
 
 impl TryFrom<i64> for SerialType {
-    type Error = FormatError;
+    type Error = StorageError;
 
     fn try_from(code: i64) -> Result<Self, Self::Error> {
         Self::try_from(code.cast_unsigned())
-            .map_err(|_| FormatError::SerialType(code.cast_unsigned()))
     }
 }
 
@@ -96,10 +98,10 @@ impl Display for Column {
 
 impl Column {
     /// Decodes one column at the start of `buf`. Returns (column, bytes consumed).
-    pub fn parse(buf: &[u8], s_type: SerialType) -> Result<(Self, usize)> {
+    pub fn parse(buf: &[u8], s_type: SerialType) -> StorageResult<(Self, usize)> {
         let n = s_type.size();
 
-        let bytes = buf.get(..n).ok_or(FormatError::Trucated {
+        let bytes = buf.get(..n).ok_or(StorageError::Truncated {
             need: n,
             have: buf.len(),
         })?;
@@ -113,8 +115,8 @@ impl Column {
             | SerialType::I24
             | SerialType::I32
             | SerialType::I48
-            | SerialType::I64 => Self::Int(int_be(bytes)?),
-            SerialType::F64 => Self::Float(f64::from_bits(int_be(bytes)?.cast_unsigned())),
+            | SerialType::I64 => Self::Int(int_be(bytes)),
+            SerialType::F64 => Self::Float(f64::from_bits(int_be(bytes).cast_unsigned())),
             SerialType::Blob(_) => Self::Blob(bytes.to_vec()),
             SerialType::Text(_) => Self::Text(String::from_utf8(bytes.to_vec())?),
         };
@@ -161,13 +163,8 @@ pub enum RecordType {
 impl Display for RecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Table {
-                parsed_columns: _parsed_columns,
-                rowid_alias: _rowid_alias,
-            } => write!(f, "table"),
-            Self::Index {
-                col_name: _col_name,
-            } => write!(f, "index"),
+            Self::Table { .. } => write!(f, "table"),
+            Self::Index { .. } => write!(f, "index"),
         }
     }
 }
