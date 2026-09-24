@@ -4,7 +4,7 @@ use tracing::{debug, info, instrument};
 
 use crate::{
     error::QueryError,
-    helpers::{QueryResult, RecordType, SqliteSchema, TableLeafCell, walk, walk_index},
+    helpers::{QueryResult, RecordType, SqliteSchema, TableLeafCell, btree_walk, walk, walk_index},
     sql::{
         ParsedTokens, Plan, TableSchemas, filter_what_col, parse_query, plan,
         resolve_table_schemas, tokenize,
@@ -47,29 +47,17 @@ pub fn run(
 
     let tbl_name = from[0].clone();
 
-    let TableSchemas { table, indexes } = resolve_table_schemas(schemas, &tbl_name)?;
+    let table_schemas = resolve_table_schemas(schemas, &tbl_name)?;
 
     let RecordType::Table {
         parsed_columns,
         rowid_alias: _,
-    } = table.ty()
+    } = table_schemas.table.ty()
     else {
         return Err(QueryError::NoSuchTable(tbl_name));
     };
 
-    debug!(?table, ?indexes);
-    let mut cells: Vec<TableLeafCell> = vec![];
-
-    let Plan {
-        indexed_conditions,
-        scan_conditions,
-    } = plan(conditions, parsed_columns, &indexes)?;
-
-    let keep = |cell: &TableLeafCell| {
-        scan_conditions
-            .iter()
-            .all(|(idx, expected)| cell.record.values.get(*idx) == Some(expected))
-    };
+    let walk_plan = plan(conditions, parsed_columns, &table_schemas)?;
 
     /*
         let keep_indexes = |cell: &TableLeafCell| {
@@ -82,35 +70,7 @@ pub fn run(
         };
     */
 
-    let mut index_cells: Vec<TableLeafCell> = vec![];
-
-    // TODO: for sicplicity we just handle first index for now, without composite indexes etc...
-    if indexed_conditions.is_empty() {
-        walk(
-            file,
-            page_size,
-            table.rootpage_index()?,
-            table.ty(),
-            &keep,
-            &mut cells,
-        )?;
-    } else {
-        // TODO: we are also not handling that index_schemas may contain indexes that doesn't exist
-        // in conditions, ideally we should derive it from indexed_conditions
-        let index_schema = indexes[0];
-
-        // traversing the indexes
-        walk_index(
-            file,
-            page_size,
-            index_schema.rootpage_index()?,
-            index_schema.ty(),
-            &mut index_cells,
-        )?;
-
-        todo!("use indexes cells to walk through and filter on remaining conditions");
-    }
-
+    let cells = btree_walk(file, walk_plan, table_schemas, page_size)?;
     if what.len() == 1 && what[0] == "count(*)".to_string() {
         return Ok(cells.len().to_string());
     }
