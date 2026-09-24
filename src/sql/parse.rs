@@ -93,16 +93,16 @@ impl Condition {
 // let the caller parse this error, and throw a new one by enriching it with query, like the
 // Malformed type, whire this being agnorant of the actual query passed to it.
 
-#[instrument(level = "info", skip(query, tokens), ret, err)]
-pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
+#[instrument(level = "info", skip(tokens), ret, err)]
+pub fn parse_query(tokens: Vec<Token>) -> QueryResult<ParsedTokens> {
     let mut query_section = QuerySection::default();
 
     let mut what: Vec<Ident> = vec![];
     let mut from: Vec<Ident> = vec![];
     let mut conditions: Vec<Condition> = vec![];
 
-    let malformed = |reason: &str| QueryError::Malformed {
-        query: query.to_owned(),
+    let malformed = |token: Token, reason: &str| QueryError::Parser {
+        token: token,
         reason: reason.to_owned(),
     };
     let mut tokens = tokens.into_iter();
@@ -110,7 +110,7 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
         match query_section {
             QuerySection::Unstarted => {
                 let Token::Keyword(keyword) = token else {
-                    return Err(malformed("expected to start with keyword"));
+                    return Err(malformed(token, "expected to start with keyword"));
                 };
 
                 query_section = query_section.try_progress_to_next_section(keyword)?;
@@ -125,6 +125,7 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
                 Token::Symbol(Symbol::Comma) => {}
                 _ => {
                     return Err(malformed(
+                        token,
                         "expected having identifiers or FROM keyword in SELECT section",
                     ));
                 }
@@ -139,12 +140,14 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
                 }
                 _ => {
                     return Err(malformed(
+                        token,
                         "expected having identifiers or WHERE keyword in FROM section",
                     ));
                 }
             },
             QuerySection::Where => {
                 return Err(malformed(
+                    token,
                     "where section shouldn't be reached in per token parsing, and should be handled seperately",
                 ));
             }
@@ -155,7 +158,9 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
         loop {
             let (Some(col), Some(sym), Some(val)) = (tokens.next(), tokens.next(), tokens.next())
             else {
-                return Err(malformed("WHERE expects triple tuple `<col> <op> <value>`"));
+                return Err(QueryError::InternalTokensParser {
+                    reason: "WHERE expects triple tuple `<col> <op> <value>`".to_string(),
+                });
             };
             let (
                 Token::Ident(column_name),
@@ -163,7 +168,9 @@ pub fn parse_query(query: &str, tokens: Vec<Token>) -> QueryResult<ParsedTokens>
                 Token::StringLit(exp_value),
             ) = (col, sym, val)
             else {
-                return Err(malformed("WHERE expects triple tuple `<col> = <value>`"));
+                return Err(QueryError::InternalTokensParser {
+                    reason: "WHERE expects triple tuple `<col> = <value>`".to_string(),
+                });
             };
 
             let condition = Condition::new(

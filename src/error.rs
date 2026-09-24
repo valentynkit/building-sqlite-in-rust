@@ -57,6 +57,8 @@ pub enum QueryError {
     Malformed { query: String, reason: String },
     #[error("couldn't parse token: {token}, reason: {reason}")]
     Parser { token: Token, reason: String },
+    #[error("couldn't parse reason: {reason}")]
+    InternalTokensParser { reason: String },
     #[error("there are no sections after {0}")]
     QuerySection(QuerySection),
     #[error("{0} uknown token")]
