@@ -5,7 +5,10 @@ use tracing::{info, instrument};
 use crate::{
     error::QueryError,
     helpers::{QueryResult, RecordType, SqliteSchema, btree_walk},
-    sql::{ParsedTokens, filter_what_col, parse_query, plan, resolve_table_schemas, tokenize},
+    sql::{
+        ParsedTokens, Projection, filter_what_col, parse_query, plan, resolve_table_schemas,
+        tokenize,
+    },
 };
 
 #[instrument(level = "info", skip(schemas, file), ret, err)]
@@ -30,7 +33,7 @@ pub fn run(
     }
 
     let ParsedTokens {
-        what,
+        projection,
         table,
         conditions,
     } = parse_query(tokens)?;
@@ -59,10 +62,9 @@ pub fn run(
     */
 
     let cells = btree_walk(file, walk_plan, table_schemas, page_size)?;
-    if what.len() == 1 && what[0] == "count(*)".to_string() {
-        return Ok(cells.len().to_string());
-    }
-
-    let out = filter_what_col(&cells, &what, parsed_columns)?;
+    let out = match projection {
+        Projection::Count => cells.len().to_string(),
+        Projection::Columns(columns) => filter_what_col(&cells, &columns, parsed_columns)?,
+    };
     Ok(out)
 }

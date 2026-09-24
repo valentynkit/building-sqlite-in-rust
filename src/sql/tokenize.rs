@@ -9,6 +9,7 @@ pub enum Keyword {
     Select,
     From,
     Where,
+    Count,
 }
 impl Display for Keyword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -16,6 +17,7 @@ impl Display for Keyword {
             Self::Select => "SELECT",
             Self::From => "FROM",
             Self::Where => "WHERE",
+            Self::Count => "COUNT",
         };
         write!(f, "{out}")
     }
@@ -24,10 +26,32 @@ impl Display for Keyword {
 // Ident and StringLit should be seperate, ident could be case ignored, lower cased, while StringLit
 // should stay exactly the same as it was
 
+const SYMBOLS_LIST: [char; 5] = [',', '=', '(', ')', '*'];
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Symbol {
     Comma,
     Equal,
+    LParen,
+    RParen,
+    Star,
+}
+
+impl TryFrom<char> for Symbol {
+    type Error = QueryError;
+
+    fn try_from(value: char) -> Result<Self, Self::Error> {
+        let symbol = match &value {
+            ',' => Self::Comma,
+            '=' => Self::Equal,
+            '(' => Self::LParen,
+            ')' => Self::RParen,
+            '*' => Self::Star,
+            _ => return Err(QueryError::SymbloParsing),
+        };
+
+        Ok(symbol)
+    }
 }
 
 impl Display for Symbol {
@@ -35,6 +59,9 @@ impl Display for Symbol {
         let out = match self {
             Self::Comma => "comma symbol",
             Self::Equal => "equal symbol",
+            Self::LParen => "lef paren symbol",
+            Self::RParen => "right paren symbol",
+            Self::Star => "star symbol",
         };
         write!(f, "{out}")
     }
@@ -113,6 +140,12 @@ pub enum Token {
     Symbol(Symbol),
 }
 
+impl From<Symbol> for Token {
+    fn from(value: Symbol) -> Self {
+        Self::Symbol(value)
+    }
+}
+
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -128,10 +161,8 @@ const fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-const IDENT_CHARS: [char; 4] = ['_', '(', ')', '*'];
-
 fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || IDENT_CHARS.contains(&c)
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 impl TryFrom<&str> for Keyword {
@@ -157,8 +188,6 @@ pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
     let mut rest = query.trim_start();
     while let Some(c) = rest.chars().next() {
         let (token, len) = match c {
-            ',' => (Token::Symbol(Symbol::Comma), 1),
-            '=' => (Token::Symbol(Symbol::Equal), 1),
             '\'' => {
                 let close = rest[1..]
                     .find('\'')
@@ -168,6 +197,7 @@ pub fn tokenize(query: &str) -> QueryResult<Vec<Token>> {
                     close + 2,
                 )
             }
+            x if SYMBOLS_LIST.contains(&x) => (Symbol::try_from(x)?.into(), 1),
             c if is_ident_start(c) => {
                 let len = rest.find(|c| !is_ident_char(c)).unwrap_or(rest.len());
                 let word = &rest[..len];
