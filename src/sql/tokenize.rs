@@ -128,8 +128,10 @@ const fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-const fn is_ident_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+const IDENT_CHARS: [char; 4] = ['_', '(', ')', '*'];
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || IDENT_CHARS.contains(&c)
 }
 
 impl TryFrom<&str> for Keyword {
