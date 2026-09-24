@@ -1,9 +1,9 @@
 use tracing::{info, instrument};
 
-use crate::{error::FormatError, helpers::page_header};
+use crate::{error::StorageResult, helpers::page_header};
 
 #[instrument(level = "info", skip(page_buf), ret, err)]
-pub fn run(page_buf: &[u8]) -> Result<String, FormatError> {
+pub fn run(page_buf: &[u8]) -> StorageResult<String> {
     info!("executing db_info command");
 
     let page_header = page_header(page_buf, 0)?;

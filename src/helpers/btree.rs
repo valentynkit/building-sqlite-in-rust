@@ -1,14 +1,13 @@
 use std::fs::File;
 
-use super::Result;
-use tracing::{error, instrument};
+use tracing::instrument;
 
 use crate::{
-    error::{FormatError, QueryError},
+    error::{QueryResult, StorageError, StorageResult},
     helpers::{
-        Column, PageType, QueryResult, RecordType, SqliteSchema, page_header, read_page,
+        Column, PageType, RecordType, page_header, read_page, read_u32,
         record::{Record, RecordHdr, SerialType},
-        varint,
+        to_usize, varint,
     },
     sql::{Plan, TableSchemas},
 };
@@ -23,8 +22,8 @@ pub struct TableLeafCell {
     pub record: Record,
 }
 
-#[instrument(level = "debug", skip(buf), ret, err)]
-pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
+#[instrument(level = "trace", skip(buf), ret)]
+pub fn parse_leaf_cell(buf: &[u8]) -> StorageResult<(TableLeafCell, usize)> {
     let mut off: usize = 0;
     // parsing cell
     let (payload_size, n) = varint(buf)?;
@@ -33,11 +32,11 @@ pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
     let (rowid, n) = varint(&buf[off..])?;
     off += n;
 
-    let record_end_off = off + usize::try_from(payload_size)?;
+    let record_end_off = off + to_usize(payload_size, "cell payload size")?;
 
     let (hdr_size, n) = varint(&buf[off..])?;
     // offset where record hdr ends
-    let record_hdr_end_off = off + usize::try_from(hdr_size)?;
+    let record_hdr_end_off = off + to_usize(hdr_size, "record header size")?;
     off += n;
     let mut serial_types: Vec<SerialType> = vec![];
 
@@ -55,7 +54,7 @@ pub fn parse_leaf_cell(buf: &[u8]) -> Result<(TableLeafCell, usize)> {
     for &s_type in rec_hdr.serial_types() {
         // Zero-width types (NULL, 0, 1) may sit exactly at the end of the record.
         if off + s_type.size() > record_end_off {
-            return Err(FormatError::RecordOverrun);
+            return Err(StorageError::RecordOverrun);
         }
         let (col, n) = Column::parse(&buf[off..], s_type)?;
         values.push(col);
@@ -73,18 +72,14 @@ pub fn walk_index(
     page_num: usize,
     record_type: &RecordType,
     cells: &mut Vec<TableLeafCell>,
-) -> QueryResult<()> {
+) -> StorageResult<()> {
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(file, &mut page_buf, page_size, page_num)?;
     let page_header = page_header(&page_buf, page_num)?;
     let page_type = page_header.page_type();
 
-    let RecordType::Index { col_name: _ } = record_type else {
-        error!("expected to have RecordType::Index");
-        return Err(QueryError::WrongRecordType {
-            expected: "Index".to_owned(),
-            actual: record_type.to_string(),
-        });
+    let RecordType::Index { .. } = record_type else {
+        unreachable!("walk_index called with a {record_type} schema");
     };
     match page_type {
         PageType::LeafIndex => {
@@ -96,13 +91,12 @@ pub fn walk_index(
         PageType::InteriorIndex => {
             for &ptr in page_header.cell_pointers() {
                 let ptr = ptr as usize;
-                let child = (u32::from_be_bytes(page_buf[ptr..ptr + 4].try_into()?) - 1) as usize;
+                let child = (read_u32(&page_buf, ptr)? - 1) as usize;
                 walk_index(file, page_size, child, record_type, cells)?;
             }
-            let Some(right_child) = page_header.right_most_child() else {
-                error!("no right child found for InteriorIndex");
-                return Err(FormatError::PageType(PageType::InteriorIndex.into()).into());
-            };
+            let right_child = page_header
+                .right_most_child()
+                .expect("interior page header always carries a right-most child");
             walk_index(
                 file,
                 page_size,
@@ -125,22 +119,14 @@ pub fn walk(
     record_type: &RecordType,
     keep: &dyn Fn(&TableLeafCell) -> bool,
     cells: &mut Vec<TableLeafCell>,
-) -> QueryResult<()> {
+) -> StorageResult<()> {
     let mut page_buf = vec![0u8; page_size as usize];
     read_page(file, &mut page_buf, page_size, page_num)?;
     let page_header = page_header(&page_buf, page_num)?;
     let page_type = page_header.page_type();
 
-    let RecordType::Table {
-        parsed_columns: _,
-        rowid_alias,
-    } = record_type
-    else {
-        error!("expected to have RecordType::Table");
-        return Err(QueryError::WrongRecordType {
-            expected: "Table".to_owned(),
-            actual: record_type.to_string(),
-        });
+    let RecordType::Table { rowid_alias, .. } = record_type else {
+        unreachable!("walk called with a {record_type} schema");
     };
 
     match page_type {
@@ -158,12 +144,12 @@ pub fn walk(
         PageType::InteriorTable => {
             for &ptr in page_header.cell_pointers() {
                 let ptr = ptr as usize;
-                let child = (u32::from_be_bytes(page_buf[ptr..ptr + 4].try_into()?) - 1) as usize;
+                let child = (read_u32(&page_buf, ptr)? - 1) as usize;
                 walk(file, page_size, child, record_type, keep, cells)?;
             }
-            let Some(right_child) = page_header.right_most_child() else {
-                return Err(FormatError::PageType(PageType::InteriorTable.into()).into());
-            };
+            let right_child = page_header
+                .right_most_child()
+                .expect("interior page header always carries a right-most child");
             walk(
                 file,
                 page_size,
@@ -178,49 +164,4 @@ pub fn walk(
         }
     }
     Ok(())
-}
-
-pub fn btree_walk(
-    file: &File,
-    plan: Plan,
-    table_schemas: TableSchemas,
-    page_size: u16,
-) -> QueryResult<Vec<TableLeafCell>> {
-    let keep = |cell: &TableLeafCell| {
-        plan.normal
-            .iter()
-            .all(|(idx, expected)| cell.record.values.get(*idx) == Some(expected))
-    };
-
-    let mut cells: Vec<TableLeafCell> = vec![];
-
-    let mut index_cells: Vec<TableLeafCell> = vec![];
-    // TODO: for sicplicity we just handle first index for now, without composite indexes etc...
-    if plan.indexed.is_empty() {
-        walk(
-            file,
-            page_size,
-            table_schemas.table.rootpage_index()?,
-            table_schemas.table.ty(),
-            &keep,
-            &mut cells,
-        )?;
-    } else {
-        // TODO: we are also not handling that index_schemas may contain indexes that doesn't exist
-        // in conditions, ideally we should derive it from indexed_conditions
-        let index_schema = table_schemas.indexes[0];
-
-        // traversing the indexes
-        walk_index(
-            file,
-            page_size,
-            index_schema.rootpage_index()?,
-            index_schema.ty(),
-            &mut index_cells,
-        )?;
-
-        todo!("use indexes cells to walk through and filter on remaining conditions");
-    }
-
-    Ok(cells)
 }

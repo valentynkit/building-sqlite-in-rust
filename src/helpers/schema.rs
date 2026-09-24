@@ -1,7 +1,9 @@
+use tracing::{debug, instrument};
+
 use crate::{
     error::StorageResult,
-    helpers::{RecordType, to_usize},
-    sql::Ident,
+    helpers::{RecordType, page_header, parse_leaf_cell, to_usize},
+    sql::{Ident, parse},
 };
 // sqlite_schema, CREATE parsing
 #[derive(Debug)]
@@ -44,4 +46,18 @@ impl SqliteSchema {
         &self.sql_query
     }
     */
+}
+
+#[instrument(level = "debug", skip(page_buf), err)]
+pub fn parse_sqlite_schemas(page_buf: &[u8]) -> StorageResult<Vec<SqliteSchema>> {
+    let page_header = page_header(page_buf, 0)?;
+    let mut schemas: Vec<SqliteSchema> = vec![];
+
+    for &ptr in page_header.cell_pointers() {
+        let (cell, _) = parse_leaf_cell(&page_buf[(ptr as usize)..])?;
+        schemas.push(parse(cell.record.values)?);
+    }
+    debug!(count = schemas.len(), "parsed sqlite schemas");
+
+    Ok(schemas)
 }

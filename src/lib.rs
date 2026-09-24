@@ -12,7 +12,8 @@ pub use cli::*;
 
 use crate::{
     commands::{dbinfo, sql_query, tables},
-    sql::{parse_first_page, parse_sqlite_schemas},
+    helpers::parse_sqlite_schemas,
+    sql::parse_first_page,
 };
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
