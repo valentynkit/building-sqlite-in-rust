@@ -24,6 +24,13 @@ pub enum StorageError {
     #[error("not a SQLite 3 database (bad header magic)")]
     NotADatabase,
 
+    #[error("failed to open file: {path}")]
+    Open {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("failed to read {len} bytes at offset {offset}")]
     Read {
         offset: u64,
@@ -46,6 +53,16 @@ pub enum StorageError {
 
     #[error("record body overruns its cell")]
     RecordOverrun,
+
+    #[error("page {page} has type {found:#04x}, which doesn't belong in a {tree} b-tree")]
+    WrongPageType {
+        page: usize,
+        tree: &'static str,
+        found: u8,
+    },
+
+    #[error("index entry has {0} columns, expected a key and a rowid")]
+    MalformedIndexEntry(usize),
 
     #[error("record has {len} columns, column {column} requested")]
     RecordTooShort { column: usize, len: usize },
@@ -74,6 +91,9 @@ pub enum StorageError {
 
     #[error("table `{0}` is defined more than once in sqlite_schema")]
     DuplicateTable(Ident),
+
+    #[error("index covers column `{0}`, which its table doesn't have")]
+    UnknownIndexColumn(Ident),
 }
 
 #[derive(Debug, Error)]

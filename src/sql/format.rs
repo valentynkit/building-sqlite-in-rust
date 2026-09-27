@@ -1,40 +1,34 @@
-use std::collections::HashMap;
-
 use crate::{
-    error::{QueryError, QueryResult, StorageError},
-    helpers::TableLeafCell,
-    sql::Ident,
+    error::{QueryResult, StorageError},
+    helpers::{ColumnIdx, TableLeafCell},
+    sql::ResolvedProjection,
 };
 
-pub fn filter_what_col(
-    cells: &[TableLeafCell],
-    what: &[Ident],
-    parsed_columns: &HashMap<Ident, usize>,
-) -> QueryResult<String> {
-    let mut out: Vec<String> = vec![String::new(); cells.len() * what.len()];
-    for (idx_col, col) in what.iter().enumerate() {
-        let Some(&t_idx) = parsed_columns.get(col) else {
-            return Err(QueryError::NoSuchColumn(col.clone()));
-        };
+pub fn format(rows: &[TableLeafCell], projection: &ResolvedProjection) -> QueryResult<String> {
+    let columns = match projection {
+        ResolvedProjection::Count => return Ok(rows.len().to_string()),
+        ResolvedProjection::Columns(columns) => columns,
+    };
 
-        for (idx_row, row) in cells.iter().enumerate() {
-            let value = row
-                .record
-                .values
-                .get(t_idx)
-                .ok_or(StorageError::RecordTooShort {
-                    column: t_idx,
-                    len: row.record.values.len(),
-                })?;
+    let lines = rows
+        .iter()
+        .map(|row| {
+            let values = &row.record.values;
+            let fields = columns
+                .iter()
+                .map(|&ColumnIdx(i)| {
+                    values
+                        .get(i)
+                        .map(ToString::to_string)
+                        .ok_or(StorageError::RecordTooShort {
+                            column: i,
+                            len: values.len(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(fields.join("|"))
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
 
-            let idx = idx_col + (idx_row * what.len());
-            out[idx] = value.to_string();
-        }
-    }
-
-    Ok(out
-        .chunks(what.len())
-        .map(|row| row.join("|"))
-        .collect::<Vec<String>>()
-        .join("\n"))
+    Ok(lines.join("\n"))
 }

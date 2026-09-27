@@ -1,10 +1,10 @@
 // VARINT, Serial Types, Column
 
-use std::{collections::HashMap, fmt::Display};
+use std::{cmp::Ordering, collections::HashMap, fmt::Display};
 
 use crate::{
     error::{StorageError, StorageResult},
-    helpers::int_be,
+    helpers::{int_be, to_usize, varint},
     sql::Ident,
 };
 
@@ -125,25 +125,65 @@ impl Column {
     }
 }
 
+impl Column {
+    /// SQLite's ordering across types: NULL < numbers < text < blob. Text compares
+    /// bytewise, which is the default BINARY collation.
+    #[allow(clippy::cast_precision_loss)] // same int-to-float comparison SQLite does
+    pub fn sqlite_cmp(&self, other: &Self) -> Ordering {
+        const fn rank(c: &Column) -> u8 {
+            match c {
+                Column::Null => 0,
+                Column::Int(_) | Column::Float(_) => 1,
+                Column::Text(_) => 2,
+                Column::Blob(_) => 3,
+            }
+        }
+        match (self, other) {
+            (Self::Int(a), Self::Int(b)) => a.cmp(b),
+            (Self::Int(a), Self::Float(b)) => (*a as f64).total_cmp(b),
+            (Self::Float(a), Self::Int(b)) => a.total_cmp(&(*b as f64)),
+            (Self::Float(a), Self::Float(b)) => a.total_cmp(b),
+            (Self::Text(a), Self::Text(b)) => a.as_bytes().cmp(b.as_bytes()),
+            (Self::Blob(a), Self::Blob(b)) => a.cmp(b),
+            _ => rank(self).cmp(&rank(other)),
+        }
+    }
+}
+
 /// One row: the record header's serial types applied to the body, in column order.
-#[derive(Debug)]
-pub struct RecordHdr {
-    serial_types: Vec<SerialType>,
-}
-
-impl RecordHdr {
-    pub(crate) const fn new(serial_types: Vec<SerialType>) -> Self {
-        Self { serial_types }
-    }
-
-    pub fn serial_types(&self) -> &[SerialType] {
-        &self.serial_types
-    }
-}
-
 #[derive(Debug)]
 pub struct Record {
     pub(crate) values: Vec<Column>,
+}
+
+impl Record {
+    /// Record format: a header-size varint, one serial-type varint per column, then
+    /// each column's body. `payload` is exactly the record's bytes.
+    pub fn parse(payload: &[u8]) -> StorageResult<Self> {
+        let (header_size, mut off) = varint(payload)?;
+        let header_end = to_usize(header_size, "record header size")?;
+        let header = payload
+            .get(..header_end)
+            .ok_or(StorageError::RecordOverrun)?;
+
+        let mut serial_types = Vec::new();
+        while off < header_end {
+            let (code, n) = varint(&header[off..])?;
+            serial_types.push(SerialType::try_from(code)?);
+            off += n;
+        }
+
+        let mut body = &payload[header_end..];
+        let values = serial_types
+            .into_iter()
+            .map(|serial_type| {
+                let (column, n) = Column::parse(body, serial_type)?;
+                body = &body[n..];
+                Ok(column)
+            })
+            .collect::<StorageResult<_>>()?;
+        Ok(Self { values })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -1,52 +1,39 @@
-use std::{collections::HashMap, fs::File};
-
 use crate::{
-    error::{QueryError, QueryResult},
-    helpers::{TableLeafCell, walk, walk_index},
-    sql::{Ident, Plan, TableSchemas},
+    error::{QueryResult, StorageResult},
+    helpers::{Column, ColumnIdx, Database, TableCursor, TableLeafCell, index_rowids, table_seek},
+    sql::{Access, Plan},
 };
 
-pub fn btree_walk(
-    file: &File,
-    plan: Plan,
-    table_schemas: TableSchemas,
-    page_size: u16,
-) -> QueryResult<Vec<TableLeafCell>> {
-    let keep = |cell: &TableLeafCell| {
-        plan.normal
+/// Fetches the rows the plan describes. The rowid alias is filled in before the filter
+/// runs, so `WHERE id = ...` sees the real value.
+pub fn execute(db: &Database, plan: &Plan) -> QueryResult<Vec<TableLeafCell>> {
+    let table = plan.table();
+    let finish = |mut row: TableLeafCell| {
+        if let Some(ColumnIdx(i)) = table.rowid_alias
+            && let Some(value) = row.record.values.get_mut(i)
+        {
+            *value = Column::Int(row.rowid);
+        }
+        let keep = plan
+            .filter()
             .iter()
-            .all(|(idx, expected)| cell.record.values.get(*idx) == Some(expected))
+            .all(|(ColumnIdx(i), expected)| row.record.values.get(*i) == Some(expected));
+        keep.then_some(row)
     };
 
-    let mut cells: Vec<TableLeafCell> = vec![];
-
-    let mut index_cells: Vec<TableLeafCell> = vec![];
-    // TODO: for sicplicity we just handle first index for now, without composite indexes etc...
-    if plan.indexed.is_empty() {
-        walk(
-            file,
-            page_size,
-            table_schemas.table.rootpage_index()?,
-            table_schemas.table.ty(),
-            &keep,
-            &mut cells,
-        )?;
-    } else {
-        // TODO: we are also not handling that index_schemas may contain indexes that doesn't exist
-        // in conditions, ideally we should derive it from indexed_conditions
-        let index_schema = table_schemas.indexes[0];
-
-        // traversing the indexes
-        walk_index(
-            file,
-            page_size,
-            index_schema.rootpage_index()?,
-            index_schema.ty(),
-            &mut index_cells,
-        )?;
-
-        todo!("use indexes cells to walk through and filter on remaining conditions");
-    }
-
-    Ok(cells)
+    let rows = match plan.access() {
+        Access::Scan => TableCursor::new(db, table.root)?
+            .filter_map(|row| row.map(finish).transpose())
+            .collect::<StorageResult<Vec<_>>>()?,
+        Access::IndexEq { index_root, key } => {
+            let mut rows = Vec::new();
+            for rowid in index_rowids(db, *index_root, key)? {
+                if let Some(row) = table_seek(db, table.root, rowid)?.and_then(finish) {
+                    rows.push(row);
+                }
+            }
+            rows
+        }
+    };
+    Ok(rows)
 }

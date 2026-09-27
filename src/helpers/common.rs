@@ -24,17 +24,6 @@ pub fn varint(buf: &[u8]) -> StorageResult<(i64, usize)> {
     Ok((value.cast_signed(), 9))
 }
 
-/// Big-endian `u32` at `at`, the width of every page number in the format.
-pub fn read_u32(buf: &[u8], at: usize) -> StorageResult<u32> {
-    buf.get(at..at + 4)
-        .and_then(|b| b.try_into().ok())
-        .map(u32::from_be_bytes)
-        .ok_or(StorageError::Truncated {
-            need: at + 4,
-            have: buf.len(),
-        })
-}
-
 /// A varint used as a length or offset; negative means the file is corrupt.
 pub fn to_usize(value: i64, what: &'static str) -> StorageResult<usize> {
     usize::try_from(value).map_err(|_| StorageError::OutOfRange { what, value })

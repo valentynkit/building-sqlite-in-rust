@@ -1,17 +1,14 @@
-use tracing::{info, instrument};
+use crate::helpers::{RecordType, SqliteSchema};
 
-use crate::helpers::SqliteSchema;
-
-#[instrument(level = "info", skip(schemas), ret)]
+/// User tables in name order, as the sqlite shell prints them. Internal `sqlite_`
+/// tables and indexes are left out.
 pub fn run(schemas: &[SqliteSchema]) -> String {
-    info!("executing .tables command");
-    let tables = schemas
+    let mut names: Vec<&str> = schemas
         .iter()
-        .map(|item| item.tbl_name().as_str())
-        .collect::<Vec<&str>>()
-        .join(" ");
-    let out = format!("table names: {tables}");
-
-    info!("finish");
-    out
+        .filter(|s| matches!(s.ty(), RecordType::Table { .. }))
+        .map(|s| s.tbl_name().as_str())
+        .filter(|name| !name.starts_with("sqlite_"))
+        .collect();
+    names.sort_unstable();
+    names.join(" ")
 }

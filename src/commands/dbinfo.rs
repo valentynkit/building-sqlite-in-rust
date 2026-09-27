@@ -1,17 +1,11 @@
-use tracing::{info, instrument};
+use crate::helpers::{Database, SqliteSchema};
 
-use crate::{error::StorageResult, helpers::page_header};
-
-#[instrument(level = "info", skip(page_buf), ret, err)]
-pub fn run(page_buf: &[u8]) -> StorageResult<String> {
-    info!("executing db_info command");
-
-    let page_header = page_header(page_buf, 0)?;
-
-    let cell_count = page_header.cell_count();
-
-    let out = format!("number of tables: {cell_count}");
-    info!("finish");
-
-    Ok(out)
+/// `number of tables` counts sqlite_schema rows, which is what the sqlite shell's
+/// `.dbinfo` reports as "number of tables" plus indexes and views.
+pub fn run(db: &Database, schemas: &[SqliteSchema]) -> String {
+    format!(
+        "database page size: {}\nnumber of tables: {}",
+        db.page_size(),
+        schemas.len()
+    )
 }
